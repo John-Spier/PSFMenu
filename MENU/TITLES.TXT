@@ -9,6 +9,9 @@ out in a specific order as shown in this sample.
 "HitMod Test 1"	"\TEST1.HIT"	"FFFFFF01"
 "Stop Music"	"STOP"	"FFFFFF00"
 "HitMod Test 2"	"\MUSIC.HIT"	"FFFFFF01"
+"SEQ Test"	"\SINFONIE.PSQ"	"FFFFFF03"
+"SEP Test"	"\SAMPLE.PSP"	"FFFFFF04"
+
 € <- End of file character (entered by typing Alt+0128).
      Everything after this character is completely ignored.
 
