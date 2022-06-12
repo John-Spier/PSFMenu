@@ -39,6 +39,8 @@
 #include <libapi.h>
 #include <kernel.h>
 #include <rand.h>
+#include <libsnd.h>
+
 
 #include "hitmod.h"
 
@@ -74,6 +76,34 @@
 //files playable
 #define MUSIC_NONE 0xFFFFFF00
 #define MUSIC_MOD 0xFFFFFF01
+
+#define MUSIC_SEQ 0xFFFFFF03
+#define MUSIC_SEP 0xFFFFFF04
+
+
+//#define MUSIC_AUTOSEP 0xFFFFFF05
+//#define MUSIC_SEPTRK 0xFFFFFF06
+/*
+SEP tracks will use a specific part of the address space.
+0x01000000 to 0x0100FFFF will be the memory range,
+if problems are found with the range of the first 64K of memory.
+This should cause no problems since the SEP track is a short,
+the first 64K of RAM is reserved for the BIOS,
+and more than 65,536 tracks will not be needed.
+Any additional tracks can be stored on CD.
+LastSelectedMultitrackItem and strncmp will be used to check for reloads.
+
+The VFS system will have two fields: sectorStart and sectorSize.
+Files will be stored directly in the VFS file without header.
+A modified titles.txt with those fields will be used for VFS files.
+This titles.txt can itself be used as the first file of a VFS file.
+sectorSize will be the file size in sectors.
+*/
+//#define MENU_TRACK 0xFFFFFFFE
+
+#define MENU_VFSBYTE 0xFFFFFFFD //uses bytes instead of sectors in the vfs. possible but probably useless
+#define MENU_VFS 0xFFFFFFFE
+#define MENU_TXT 0xFFFFFFFF
 
 // Ordering tables and packet buffers for the graphics system
 GsOT 		myOT[2];
@@ -123,6 +153,18 @@ int		NumTitles=0;
 int 	SelTitle=0;
 char	StringBuff[32]={0};
 
+int		LastSelectedMultitrackItem=-1;
+
+
+short seq1;  /* SEQ data id */
+short sep1;  /* SEP data id */
+short vab1;  /* VAB data id */
+short septrk;
+short curtrk;
+
+//char seq_table[SS_SEQ_TABSIZ * 4 * 5];
+char seq_table[SS_SEQ_TABSIZ * 10 * 10];
+
 
 // For launching an EXE
 struct EXEC ExeParams;
@@ -159,6 +201,7 @@ int ChangeMusic (TITLESTRUCT file);
 int PlayMusic (u_long filetype);
 int PauseMusic (u_long filetype);
 
+short ChangeTrack (short nowtrack, u_long filetype);
 
 // Include my custom little libraries
 #include "timlib.c"
@@ -210,10 +253,22 @@ void DoMenu() {
 	int		TransState=0;
 	
 	int		PadStatus=0;
+	/*
 	int		uPressed=0;
 	int		dPressed=0;
 	int		uPressedCount=0;
 	int		dPressedCount=0;
+	
+	int		pausePressed=0;
+	int		nextPressed=0;
+	int		pausePressedCount=0;
+	int		nextPressedCount=0;
+	int		prevPressed=0;
+	int		prevPressedCount=0;
+	*/
+	u_long		padPressed=0;
+	int		padPressedCount=0;
+	
 	
 	int		LoadError=false;
 	
@@ -278,52 +333,113 @@ void DoMenu() {
 		
 		// Title selection controls
 		if (TitleChosen == false) {
+
+			//printf("PAD %i\n",PadStatus);
+			//select nothing
+			if (PadStatus == 0) {
+				padPressed = 0;
+				padPressedCount = 0;
+			}
 			
 			// Select up
 			if (PadStatus & PADLup) {
 				if (SelTitle > 0) {
-					if (uPressed == false)	SelTitle -= 1;
-					if (uPressedCount >= 32) uPressedCount = 30;
-					if (uPressedCount == 30) SelTitle -= 1;
-					uPressedCount += 1;
+					if (padPressed != PADLup)	{
+					SelTitle -= 1;
+					padPressedCount = 0;
+					}
+					if (padPressedCount >= 32) padPressedCount = 30;
+					if (padPressedCount == 30) SelTitle -= 1;
+					padPressedCount += 1;
 				}
-				uPressed = true;
-			} else {
-				uPressedCount = 0;
-				uPressed = false;
+				padPressed = PADLup;
 			}
 			
 			// Select down
 			if (PadStatus & PADLdown) {
 				if (SelTitle < (NumTitles - 1)) {
-					if (dPressed == false)	SelTitle += 1;
-					if (dPressedCount >= 32)	dPressedCount = 30;
-					if (dPressedCount == 30)	SelTitle += 1;
-					dPressedCount += 1;
+					if (padPressed != PADLdown) {	
+					SelTitle += 1;
+					padPressedCount = 0;
+					}
+					if (padPressedCount >= 32)	padPressedCount = 30;
+					if (padPressedCount == 30)	SelTitle += 1;
+					padPressedCount += 1;
 				}
-				dPressed = true;
-			} else {
-				dPressed = false;
-				dPressedCount = 0;
+				padPressed = PADLdown;
 			}
 			
-			if (PadStatus & PADRup) {
-				if (!MusPlaying) {
-					MusPlaying=PlayMusic(MusType);
+			// Select Track Up
+			if (PadStatus & PADR1) {
+			#if DEBUG
+			printf("%i presses, %hi current track, %hi tracks total\n", padPressedCount, curtrk, septrk);
+			#endif
+				if (curtrk < (septrk - 1)) {
+					if (padPressed != PADR1)	{
+					curtrk = ChangeTrack(curtrk+1, MusType);
+					padPressedCount = 0;
+					}
+					if (padPressedCount >= 32) padPressedCount = 30;
+					if (padPressedCount == 30) curtrk = ChangeTrack(curtrk+1, MusType);
+					padPressedCount += 1;
 				}
+				padPressed = PADR1;
 			}
 			
-			if (PadStatus & PADRleft) {
-				if (MusPlaying) {
-					MusPlaying=PauseMusic(MusType);
+			// Select Track Down
+			if (PadStatus & PADL1) {
+			#if DEBUG
+			printf("%i presses, %hi current track, %hi tracks total\n", padPressedCount, curtrk, septrk);
+			#endif
+				if (curtrk > 0) {
+					if (padPressed != PADL1) {	
+					curtrk = ChangeTrack(curtrk-1, MusType);
+					padPressedCount = 0;
+					}
+					if (padPressedCount >= 32)	padPressedCount = 30;
+					if (padPressedCount == 30)	curtrk = ChangeTrack(curtrk-1, MusType);
+					padPressedCount += 1;
 				}
+				padPressed = PADL1;
+			}
+			
+			if (PadStatus & PADRright) {
+
+				if (padPressed != PADRright) {
+					padPressedCount=0;
+					if (MusPlaying) {
+						MusPlaying=PauseMusic(MusType);
+					} else {
+						MusPlaying=PlayMusic(MusType);
+					}
+				}
+				/*
+				if (padPressedCount >= 32)	padPressedCount = 0;
+				if (padPressedCount == 30)	{
+				#if DEBUG
+				printf("30 presses, pausing again\n");
+				#endif
+					if (MusPlaying) {
+						MusPlaying=PauseMusic(MusType);
+					} else {
+						MusPlaying=PlayMusic(MusType);
+					}
+				}
+				*/
+				padPressedCount += 1;
+				padPressed = PADRright;
+				#if DEBUG
+				printf("%i presses now\n", padPressedCount);
+				#endif
 			}
 			
 			// Start game
-			if ((PadStatus & PADRdown) || (PadStatus & PADRright) || (PadStatus & PADstart)) {
+			if ((PadStatus & PADRdown) || (PadStatus & PADstart)) {
 				switch (Title[SelTitle].StackAddr) {
 					case MUSIC_NONE:
 					case MUSIC_MOD:
+					case MUSIC_SEQ:
+					case MUSIC_SEP:
 						#if DEBUG
 						printf("chosen: %s %i\n", Title[SelTitle].ExecFile, Title[SelTitle].StackAddr);
 						#endif
@@ -975,6 +1091,16 @@ int StopMusic (u_long filetype) {
 			MOD_Free();
 			return 0;
 			break;
+		case MUSIC_SEQ:
+			SsSeqClose (seq1);
+			SsVabClose (vab1);
+			return 0;
+			break;
+		case MUSIC_SEP:
+			SsSepClose (sep1);
+			SsVabClose (vab1);
+			return 0;
+			break;
 		default:
 			return 1;
 	}
@@ -983,7 +1109,7 @@ int StopMusic (u_long filetype) {
 }
 
 int ChangeMusic (TITLESTRUCT file) {
-	
+	//int strackvol;
 		switch (file.StackAddr) {
 		case MUSIC_NONE:
 			return 0;
@@ -993,6 +1119,66 @@ int ChangeMusic (TITLESTRUCT file) {
 			CdReadSync(0, 0);
 			MOD_Load((u_char*)MOD_AREA);
 			MOD_Start();
+			return 0;
+			break;
+		case MUSIC_SEQ:
+			CdReadFile(file.ExecFile, (u_long*)MOD_AREA, 0);
+			CdReadSync(0, 0);
+			vab1 = SsVabOpenHead ((unsigned char*)QLPfilePtr((u_long*)MOD_AREA, 1), -1);
+			#if DEBUG
+				if( vab1 == -1 ) {
+				printf("Failed to open VH!\n");
+				}
+			#endif
+			vab1 = SsVabTransBody ((unsigned char*)QLPfilePtr((u_long*)MOD_AREA, 2), vab1);
+			#if DEBUG
+				if( vab1 == -1 ) {
+				printf("Failed to open VB!\n");
+				}
+			#endif
+			SsVabTransCompleted (SS_WAIT_COMPLETED);
+			SsStart();
+			seq1 = SsSeqOpen ((unsigned long*)QLPfilePtr((u_long*)MOD_AREA, 0), vab1);
+			SsSetMVol (127, 127);
+			SsSeqSetVol (seq1, 127, 127);
+			SsSeqPlay(seq1, SSPLAY_PLAY, SSPLAY_INFINITY);
+			return 0;
+			break;
+		case MUSIC_SEP:
+			CdReadFile(file.ExecFile, (u_long*)MOD_AREA, 0);
+			CdReadSync(0, 0);
+			vab1 = SsVabOpenHead ((unsigned char*)QLPfilePtr((u_long*)MOD_AREA, 1), -1);
+			#if DEBUG
+				if( vab1 == -1 ) {
+				printf("Failed to open VH\n");
+				}
+			#endif
+			vab1 = SsVabTransBody ((unsigned char*)QLPfilePtr((u_long*)MOD_AREA, 2), vab1);
+			#if DEBUG
+				if( vab1 == -1 ) {
+				printf("Failed to open VB\n");
+				}
+			#endif
+			SsVabTransCompleted (SS_WAIT_COMPLETED);
+			SsStart();
+			septrk = ((short)*QLPfilePtr((u_long*)MOD_AREA, 3));
+			#if DEBUG
+			printf("SEP Track Number Loaded to %X with %hi tracks\n",QLPfilePtr((u_long*)MOD_AREA, 3),septrk);
+			//septrk=3;
+			#endif
+			sep1 = SsSepOpen ((unsigned long*)QLPfilePtr((u_long*)MOD_AREA, 0), vab1, septrk);
+			#if DEBUG
+			printf("SEP Opened at %X\n",QLPfilePtr((u_long*)MOD_AREA, 0));
+			#endif
+			SsSetMVol (127, 127);
+			for (curtrk = 0; curtrk < septrk; curtrk++) {
+			SsSepSetVol (sep1, curtrk, 127, 127); //indenting didnt work dont know why
+			#if DEBUG
+			printf("SEP Track %hi Volume Set\n",curtrk);
+			#endif
+			}
+			curtrk = 0;
+			SsSepPlay(sep1, curtrk, SSPLAY_PLAY, SSPLAY_INFINITY);
 			return 0;
 			break;
 		default:
@@ -1010,6 +1196,12 @@ int UnloadMusic (u_long filetype) {
 		case MUSIC_MOD:
 			return 0;
 			break;
+		case MUSIC_SEP:
+		case MUSIC_SEQ:
+			SsEnd();
+			SsQuit();
+			return 0;
+			break;
 		default:
 			return 1;
 		}
@@ -1025,7 +1217,14 @@ int LoadMusic (u_long filetype) {
 			break;
 		case MUSIC_MOD:
 			MOD_Init();
-
+			return 0;
+			break;
+		case MUSIC_SEQ:
+		case MUSIC_SEP:
+			SsInit();
+			//SsSetTableSize (seq_table, 4, 5);
+			SsSetTableSize (seq_table, 10, 10);
+			SsSetTickMode (SS_TICK240);
 			return 0;
 			break;
 		default:
@@ -1045,6 +1244,14 @@ int PlayMusic (u_long filetype) {
 			MOD_Start();
 			return 1;
 			break;
+		case MUSIC_SEQ:
+			SsSeqReplay(seq1);
+			return 1;
+			break;
+		case MUSIC_SEP:
+			SsSepReplay(sep1, curtrk);
+			return 1;
+			break;
 		default:
 			return 1;
 		}
@@ -1062,9 +1269,36 @@ int PauseMusic (u_long filetype) {
 			MOD_Stop();
 			return 0;
 			break;
+		case MUSIC_SEQ:
+			SsSeqPause(seq1);
+			return 0;
+			break;
+		case MUSIC_SEP:
+			SsSepPause(sep1, curtrk);
+			return 0;
+			break;
 		default:
 			return 0;
 		}
 	return 1;
 
+}
+
+short ChangeTrack (short nowtrack, u_long filetype) {
+	switch (filetype) {
+		case MUSIC_NONE:
+		case MUSIC_MOD:
+		case MUSIC_SEQ:
+			return nowtrack;
+			break;
+		case MUSIC_SEP:
+			SsSepStop(sep1, curtrk);
+			SsSepPlay(sep1, nowtrack, SSPLAY_PLAY, SSPLAY_INFINITY);
+			return nowtrack;
+			break;
+		default:
+			return nowtrack;
+			break;
+		}
+	return nowtrack;
 }
