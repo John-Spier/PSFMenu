@@ -5,7 +5,7 @@ A menu application for PlayStation that loads both music files and EXE files. Ba
 
 ## Music controls
 
-X = Select/play file
+⨯ = Select/play file
 
 ○ = Play/pause track
 
