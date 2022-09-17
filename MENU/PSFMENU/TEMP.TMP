@@ -1,0 +1,29 @@
+The loader will only accept text that is in between quotation marks so any
+text outside of it are treated as comments. However, each entry must be laid
+out in a specific order as shown in this sample.
+
+
+"EXE Test"	Title of game (63 characters max)
+"\TEST1.EXE"	Path to EXE file (31 characters max)
+"801FFFF0"		Stack address (from the game's SYSTEM.CNF file)
+"VFS Test"	"\PSQPACK.VFS"	"FFFFFFFE"
+"Stop Music"	"STOP"	"FFFFFF00"
+"HitMod Test"	"\MUSIC.HIT"	"FFFFFF01"
+"SEQ Test"	"\SINFONIE.PSQ"	"FFFFFFFE"
+"SEP Test"	"\SAMPLE.PSP"	"FFFFFF04"
+
+� <- End of file character (entered by typing Alt+0128).
+     Everything after this character is completely ignored.
+
+Stack addresses with specific values are used to load music file formats.
+FFFFFFXX is the base "address", and XX is the type of file.
+00 = Stop playing music.
+01 = HITMOD mod file converted with modconv.
+
+
+You can also stack the entries as a single lines like this:
+
+"A PlayStation Game"	"\GAMEDIR\GAME.EXE"	"801FFFF0"
+"A PlayStation Game 2"	"\GAMEDIR2\GAME.EXE"	"801FFFF0"
+
+...and it looks nicer too.
