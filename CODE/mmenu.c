@@ -51,14 +51,19 @@
 
 
 // Toggles debug mode
-#define DEBUG	true
+#define DEBUG	false
 
 // Stuff you can change to suit your needs
-#define MAX_TITLES			32
-#define MOD_AREA			0x80010000
-#define TEMP_AREA			0x80090000	// Just 512KB above MOD_AREA
+#define MENU_AREA			0x80010000
+#define MAX_TITLES			1024
+#define MENU_SIZE			MAX_TITLES*128
+#define MOD_AREA			0x80030000	// MUST BE MANUAL?
+#define TEMP_AREA			0x80030000	
 #define QLP_MAXSIZE			1024*128
 #define LISTFILE_MAXSIZE	1024*8
+
+#define TITLE_AREA			0x8003000C
+#define CONT_AREA			0x80030800
 
 // Cosmetic stuff
 #define MAX_BUBBLES	64
@@ -76,32 +81,18 @@
 //files playable
 #define MUSIC_NONE 0xFFFFFF00
 #define MUSIC_MOD 0xFFFFFF01
-
+#define MUSIC_XM 0xFFFFFF02
 #define MUSIC_SEQ 0xFFFFFF03
 #define MUSIC_SEP 0xFFFFFF04
 
+#define SEP_MIN 0x01000000
+#define SEP_MAX 0x0100FFFF
 
-//#define MUSIC_AUTOSEP 0xFFFFFF05
-//#define MUSIC_SEPTRK 0xFFFFFF06
-/*
-SEP tracks will use a specific part of the address space.
-0x01000000 to 0x0100FFFF will be the memory range,
-if problems are found with the range of the first 64K of memory.
-This should cause no problems since the SEP track is a short,
-the first 64K of RAM is reserved for the BIOS,
-and more than 65,536 tracks will not be needed.
-Any additional tracks can be stored on CD.
-LastSelectedMultitrackItem and strncmp will be used to check for reloads.
+#define SEQ_MIN 0x01010000
+#define SEQ_MAX 0x0101FFFF
 
-The VFS system will have two fields: sectorStart and sectorSize.
-Files will be stored directly in the VFS file without header.
-A modified titles.txt with those fields will be used for VFS files.
-This titles.txt can itself be used as the first file of a VFS file.
-sectorSize will be the file size in sectors.
-*/
-//#define MENU_TRACK 0xFFFFFFFE
-
-#define MENU_VFSBYTE 0xFFFFFFFD //uses bytes instead of sectors in the vfs. possible but probably useless
+#define MENU_VFSBYTE 0xFFFFFFFC //uses bytes instead of sectors in the vfs. possible but probably useless
+#define MENU_TXTVFS 0xFFFFFFFFD
 #define MENU_VFS 0xFFFFFFFE
 #define MENU_TXT 0xFFFFFFFF
 
@@ -143,19 +134,23 @@ u_char CharWidth[] = {
 // Struct to store title names and executable paths
 typedef struct {
 	char	Name[64];
-	char	ExecFile[32];
+	char	ExecFile[52];
 	u_long	StackAddr;
+	int 	SectorStart;
+	int 	SectorLength;
 } TITLESTRUCT;
 
-TITLESTRUCT Title[MAX_TITLES]={0};
+//TITLESTRUCT Title[MAX_TITLES]={0};
+TITLESTRUCT* Title=(TITLESTRUCT*)MENU_AREA;
 
 int		NumTitles=0;
 int 	SelTitle=0;
-char	StringBuff[32]={0};
+char	StringBuff[56]={0};
+char	NameBuff[64]={0};
 
-int		LastSelectedMultitrackItem=-1;
+int		LSMI=MAX_TITLES + 1;
 
-
+short vol = 127;
 short seq1;  /* SEQ data id */
 short sep1;  /* SEP data id */
 short vab1;  /* VAB data id */
@@ -173,14 +168,14 @@ struct EXEC ExeParams;
 // Function prototypes
 int main();
 void DoMenu();
-int LoadEXEfile(char *FileName, struct EXEC *params);
+int LoadEXEfile(char *FileName, struct EXEC *params,  u_long ssect, u_long nsect);
 
 void fPrint(char *string, short x, short y, char opacity, GsOT *otptr, GsIMAGE font);
 void SortBigImage (int x, int y, GsIMAGE TimImage);
 
 void Init();
-void LoadGraphics();
-void InitTitles();
+void LoadGraphics(char* gfxfile, u_long ssect, u_long nsect);
+void InitTitles(char* titlefile, u_long ssect, u_long nsect);
 
 float frand();
 int hex2int(char *string);
@@ -202,7 +197,13 @@ int PlayMusic (u_long filetype);
 int PauseMusic (u_long filetype);
 
 short ChangeTrack (short nowtrack, u_long filetype);
+short ChangeVol (short nowvol, u_long filetype);
 
+void InitVfs(char* vfsfile);
+int CDRF(char* file, u_long *addr, u_long startsect, u_long nsect);
+int LoadSep (char* name, u_long* addr, u_long ssect, u_long nsect, short ptrack);
+short LoadSeq (u_long* addr, short ptrack, int extfiles);
+int str_n_cmp (char* str1, char* str2, int len);
 // Include my custom little libraries
 #include "timlib.c"
 #include "qlplib.c"
@@ -266,9 +267,10 @@ void DoMenu() {
 	int		prevPressed=0;
 	int		prevPressedCount=0;
 	*/
+	
 	u_long		padPressed=0;
 	int		padPressedCount=0;
-	
+
 	
 	int		LoadError=false;
 	
@@ -403,6 +405,41 @@ void DoMenu() {
 				padPressed = PADL1;
 			}
 			
+			// Select Volume Up
+			if (PadStatus & PADR2) {
+			#if DEBUG
+			printf("%i presses, %hi current volume\n", padPressedCount, vol);
+			#endif
+				if (vol < 127) {
+					if (padPressed != PADR2)	{
+					vol = ChangeVol(vol+1, MusType);
+					padPressedCount = 0;
+					}
+					if (padPressedCount >= 32) padPressedCount = 30;
+					if (padPressedCount == 30) vol = ChangeVol(vol+1, MusType);
+					padPressedCount += 1;
+				}
+				padPressed = PADR2;
+			}
+			
+			// Select Volume Down
+			if (PadStatus & PADL2) {
+			#if DEBUG
+			printf("%i presses, %hi current volume\n", padPressedCount, vol);
+			#endif
+				if (vol > 0) {
+					if (padPressed != PADL2) {	
+					vol = ChangeVol(vol-1, MusType);
+					padPressedCount = 0;
+					}
+					if (padPressedCount >= 32)	padPressedCount = 30;
+					if (padPressedCount == 30)	vol = ChangeVol(vol-1, MusType);
+					padPressedCount += 1;
+				}
+				padPressed = PADL2;
+			}
+			
+			
 			if (PadStatus & PADRright) {
 
 				if (padPressed != PADRright) {
@@ -433,22 +470,127 @@ void DoMenu() {
 				#endif
 			}
 			
+			if (PadStatus & PADselect) {
+				if (padPressed != PADselect) {
+					padPressedCount=0;
+					StopMusic(MusType);
+					UnloadMusic(MusType);
+					MusType = MUSIC_NONE;
+				}
+				padPressedCount += 1;
+				padPressed = PADselect;
+				#if DEBUG
+				printf("%i presses now\n", padPressedCount);
+				#endif
+			}
+			
+			if (PadStatus & PADstart) {
+				if (padPressed != PADstart) {
+					padPressedCount=0;
+					StopMusic(MusType);
+					UnloadMusic(MusType);
+					MusType = MUSIC_NONE;
+					SelTitle = 0;
+					LSMI = MAX_TITLES + 1;
+					InitTitles("\\PSFMENU\\TITLES.TXT", 0, 0);
+				}
+				padPressedCount += 1;
+				padPressed = PADstart;
+				#if DEBUG
+				printf("%i presses now\n", padPressedCount);
+				#endif
+			}
+			
 			// Start game
-			if ((PadStatus & PADRdown) || (PadStatus & PADstart)) {
-				switch (Title[SelTitle].StackAddr) {
-					case MUSIC_NONE:
-					case MUSIC_MOD:
-					case MUSIC_SEQ:
-					case MUSIC_SEP:
-						#if DEBUG
-						printf("chosen: %s %i\n", Title[SelTitle].ExecFile, Title[SelTitle].StackAddr);
-						#endif
-						MusType = StartMusic(Title[SelTitle], MusType);
-						MusPlaying = true;
-						break;
-					default:
-						TitleChosen = true;
-						TransCount = 0;
+			if (PadStatus & PADRdown) {
+				if (padPressed != PADRdown) {
+					if ((Title[SelTitle].StackAddr >= SEP_MIN) && (Title[SelTitle].StackAddr <= SEP_MAX)) {
+					
+						if (LSMI <= MAX_TITLES && Title[LSMI].SectorStart == Title[SelTitle].SectorStart && Title[LSMI].SectorLength == Title[SelTitle].SectorLength && str_n_cmp(Title[LSMI].ExecFile, Title[SelTitle].ExecFile, 52) == 0) {
+							#if DEBUG
+							printf("Multitrack correct, switching track to %i\n", Title[SelTitle].StackAddr - SEP_MIN);
+							#endif
+							curtrk = ChangeTrack(Title[SelTitle].StackAddr - SEP_MIN, MUSIC_SEP);
+						} else {
+							#if DEBUG
+							printf("Multitrack incorrect, switching track to %i\n", Title[SelTitle].StackAddr - SEP_MIN);
+							#endif
+							StopMusic(MusType);
+							if (MusType != MUSIC_SEP) {
+								#if DEBUG
+								printf("Changing music type to SEP\n");
+								#endif
+								UnloadMusic(MusType);
+								LoadMusic(MUSIC_SEP);
+								MusType = MUSIC_SEP;
+								
+							}
+							LoadSep(Title[SelTitle].ExecFile, (u_long*)MOD_AREA, Title[SelTitle].SectorStart, Title[SelTitle].SectorLength, (short)(Title[SelTitle].StackAddr - SEP_MIN));
+							LSMI = SelTitle;
+						}
+					} else if ((Title[SelTitle].StackAddr >= SEQ_MIN) && (Title[SelTitle].StackAddr <= SEQ_MAX)) {
+						if (LSMI <= MAX_TITLES && Title[LSMI].SectorStart == Title[SelTitle].SectorStart && Title[LSMI].SectorLength == Title[SelTitle].SectorLength && str_n_cmp(Title[LSMI].ExecFile, Title[SelTitle].ExecFile, 52) == 0) {
+							#if DEBUG
+							printf("Multitrack correct. Switching track to %i\n", Title[SelTitle].StackAddr - SEQ_MIN);
+							#endif
+							curtrk = ChangeTrack(Title[SelTitle].StackAddr - SEQ_MIN, MUSIC_SEQ);
+						} else {
+							#if DEBUG
+							printf("Multitrack incorrect. Switching track to %i\n", Title[SelTitle].StackAddr - SEQ_MIN);
+							#endif
+							StopMusic(MusType);
+							if (MusType != MUSIC_SEQ) {
+								#if DEBUG
+								printf("Changing music type to SEQ\n");
+								#endif
+								UnloadMusic(MusType);
+								LoadMusic(MUSIC_SEQ);
+								MusType = MUSIC_SEQ;
+								
+							}
+							CDRF(Title[SelTitle].ExecFile, (u_long*)MOD_AREA, Title[SelTitle].SectorStart, Title[SelTitle].SectorLength);
+							CdReadSync(0, 0);
+							LoadSeq((u_long*)MOD_AREA, (short)(Title[SelTitle].StackAddr - SEQ_MIN), 0);
+							LSMI = SelTitle;
+						}
+					} else switch (Title[SelTitle].StackAddr) {
+						case MUSIC_NONE:
+						case MUSIC_MOD:
+						case MUSIC_SEQ:
+						case MUSIC_SEP:
+							#if DEBUG
+							printf("chosen: %s %i\n", Title[SelTitle].ExecFile, Title[SelTitle].StackAddr);
+							#endif
+							MusType = StartMusic(Title[SelTitle], MusType);
+							MusPlaying = true;
+							break;
+						case MENU_TXT:
+							StopMusic(MusType);
+							UnloadMusic(MusType);
+							MusType = MUSIC_NONE;
+							sprintf(StringBuff, "%s", Title[SelTitle].ExecFile);
+							SelTitle = 0;
+							LSMI = MAX_TITLES + 1;
+							InitTitles(StringBuff, Title[SelTitle].SectorStart, Title[SelTitle].SectorLength);
+							break;
+						case MENU_VFS:
+							StopMusic(MusType);
+							UnloadMusic(MusType);
+							MusType = MUSIC_NONE;
+							sprintf(StringBuff, "%s", Title[SelTitle].ExecFile);
+							SelTitle = 0;
+							LSMI = MAX_TITLES + 1;
+							InitVfs(StringBuff);
+							break;
+						default:
+							TitleChosen = true;
+							TransCount = 0;
+							break;
+					}
+					padPressed = PADRdown;
+					padPressedCount = 0;
+				} else {
+					padPressedCount++;
 				}
 			}
 			
@@ -551,13 +693,16 @@ void DoMenu() {
 	
 	
 	// Stop the music
-	MOD_Stop();
-	MOD_Free();
-	
+	//MOD_Stop();
+	//MOD_Free();
+	StopMusic(MusType);
+	UnloadMusic(MusType);
+	MusType = MUSIC_NONE;
 	
 	// Begin loading the EXE file in the background and get its parameters
 	sprintf(StringBuff, "%s;1", Title[SelTitle].ExecFile);
-	if (LoadEXEfile(StringBuff, &ExeParams) == 0) LoadError=true;
+	sprintf(NameBuff, "%s", Title[SelTitle].Name);
+	if (LoadEXEfile(StringBuff, &ExeParams, Title[SelTitle].SectorStart, Title[SelTitle].SectorLength) == 0) LoadError=true;
 	
 	
 	// Display the title of the game being loaded
@@ -565,11 +710,11 @@ void DoMenu() {
 	for (i=0; i<127; i+=2) {
 		PrepDisplay();
 		if (LoadError == false) {
-			fPrint("Now Loading", CENTERED, 220, i, &myOT[ActiveBuffer], FontTIM);
-			fPrint(Title[SelTitle].Name, CENTERED, 240, i, &myOT[ActiveBuffer], FontTIM);
+			fPrint("Now Playing", CENTERED, 220, i, &myOT[ActiveBuffer], FontTIM);
+			fPrint(NameBuff, CENTERED, 240, i, &myOT[ActiveBuffer], FontTIM);
 		} else {
 			fPrint("ERROR! Cannot find file:", CENTERED, 220, i, &myOT[ActiveBuffer], FontTIM);
-			fPrint(Title[SelTitle].ExecFile, CENTERED, 240, i, &myOT[ActiveBuffer], FontTIM);
+			fPrint(StringBuff, CENTERED, 240, i, &myOT[ActiveBuffer], FontTIM);
 		}
 		Display();
 	}
@@ -578,11 +723,11 @@ void DoMenu() {
 	for (i=0; i<2; i+=1) {
 		PrepDisplay();
 		if (LoadError == false) {
-			fPrint("Now Loading", CENTERED, 220, 128, &myOT[ActiveBuffer], FontTIM);
-			fPrint(Title[SelTitle].Name, CENTERED, 240, 128, &myOT[ActiveBuffer], FontTIM);
+			fPrint("Now Playing", CENTERED, 220, 128, &myOT[ActiveBuffer], FontTIM);
+			fPrint(NameBuff, CENTERED, 240, 128, &myOT[ActiveBuffer], FontTIM);
 		} else {
 			fPrint("ERROR! Cannot find file:", CENTERED, 220, 128, &myOT[ActiveBuffer], FontTIM);
-			fPrint(Title[SelTitle].ExecFile, CENTERED, 240, 128, &myOT[ActiveBuffer], FontTIM);
+			fPrint(StringBuff, CENTERED, 240, 128, &myOT[ActiveBuffer], FontTIM);
 		}
 		DisplayNoClear();
 	}
@@ -603,7 +748,7 @@ void DoMenu() {
 	#endif
 	
 }
-int LoadEXEfile(char *FileName, struct EXEC *Params) {
+int LoadEXEfile(char *FileName, struct EXEC *Params, u_long ssect, u_long nsect) {
 	
 	typedef struct {
 		u_char		Pad[16];
@@ -623,7 +768,7 @@ int LoadEXEfile(char *FileName, struct EXEC *Params) {
 	// Search for the file to load
 	if (CdSearchFile(&File, FileName) == 0) {
 		#if DEBUG
-		printf("File not found.\n");
+		printf("File not found: %s\n", FileName);
 		#endif
 		return(0);
 	}
@@ -631,8 +776,9 @@ int LoadEXEfile(char *FileName, struct EXEC *Params) {
 	#if DEBUG
 	printf("Found it!\n");
 	#endif
-	
-	
+	if (ssect > 0) {
+		CdIntToPos(CdPosToInt(&File.pos)+ssect, &File.pos);
+	}
 	// Seek to the EXE file and read its header
 	CdControl(CdlSetloc, (u_char*)&File.pos, 0);
 	CdRead(1, (u_long*)&Header, Mode);
@@ -653,8 +799,21 @@ int LoadEXEfile(char *FileName, struct EXEC *Params) {
 	// Seek to next sector and read the rest of the EXE file
 	CdIntToPos(CdPosToInt(&File.pos)+1, &File.pos);
 	CdControl(CdlSetloc, (u_char*)&File.pos, 0);
-	CdRead(((File.size - 2048)+2047)/2048, (void*)Params->t_addr, Mode);
-	
+
+	if (nsect > 1) {
+		#if DEBUG
+		printf("CD Position set, loading %i sectors...",nsect);
+		#endif
+		CdRead(nsect - 1, (void*)Params->t_addr, Mode);
+	} else {
+		#if DEBUG
+		printf("CD Position set, loading rest of file...");
+		#endif
+		CdRead(((File.size - 2048)+2047)/2048, (void*)Params->t_addr, Mode);
+	}
+	#if DEBUG
+	printf("CdRead started...");
+	#endif
 	return(1);
 	
 }
@@ -799,7 +958,7 @@ void Init() {
 	}
 	
 	// Wait for the MOD to finally finish loading
-	CdReadSync(0, 0);
+	//CdReadSync(0, 0);
 	
 	
 	// Check whether if system is an NTSC or PAL region unit
@@ -828,23 +987,25 @@ void Init() {
 	
 	GsClearOt(0, 0, &myOT[0]);
 	GsClearOt(0, 0, &myOT[1]);
-	
-	
+	#if DEBUG
+	printf("Title array size: %i Title array location: %X\n", MENU_SIZE, Title);
+	#endif
 	// Load the menu graphics and title entries
-	LoadGraphics();
-	InitTitles();
+	LoadGraphics("\\PSFMENU\\GRAPHICS.QLP", 0, 0);
+	InitTitles("\\PSFMENU\\TITLES.TXT", 0, 0);
 	
 	// Init controller
 	PadInit(0);
 	
 }
-void LoadGraphics() {
+void LoadGraphics(char* gfxfile, u_long ssect, u_long nsect) {
 	
 	// Load the QLP pack and upload all the TIMs inside it onto VRAM
 	#if DEBUG
-	printf("Loading GRAPHICS.QLP...");
+	printf("Loading %s...", gfxfile);
 	#endif
-	CdReadFile("\\GRAPHICS.QLP", (u_long*)TEMP_AREA, 0);
+	//CdReadFile(gfxfile, (u_long*)TEMP_AREA, 0);
+	CDRF(gfxfile, (u_long*)TEMP_AREA, ssect, nsect);
 	CdReadSync(0, 0);
 	
 	FontTIM			= LoadTIM(QLPfilePtr((u_long*)TEMP_AREA, 0));
@@ -854,26 +1015,85 @@ void LoadGraphics() {
 	
 	#if DEBUG
 	printf("Done.\n");
-	printf("FONT ADDR: %X\n",QLPfilePtr((u_long*)TEMP_AREA, 3));
+	printf("FONT ADDR: %X\n",QLPfilePtr((u_long*)TEMP_AREA, 0));
 	#endif
 	
 }
-void InitTitles() {
+
+void InitVfs(char* vfsfile) {
+	typedef struct {
+		char	name[64];
+		u_long	size;
+		u_long	addr;
+		u_long	sector_size;
+		u_long	byte_addr;
+		u_long	stack;
+	} VFSFILE;
+	CdlFILE cdf;
+	int sect, titlenum;
+	int i;
+	VFSFILE* titles = (VFSFILE*)TITLE_AREA;
+	sprintf(NameBuff, "%s;1", vfsfile);
+	//CDRF(vfsfile, (u_long*)TEMP_AREA, 0, 1);
+	if (CdSearchFile(&cdf, NameBuff) == 0) {
+		printf("VFS not found: %s\n", NameBuff);
+		return;
+	}
+	CdControl(CdlSetloc, (u_char*)&cdf.pos, 0);
+	CdRead(1, (u_long*)TEMP_AREA, CdlModeSpeed);
+	CdReadSync(0, 0);
+	sect = *((u_long*)TEMP_AREA + 2);
+	titlenum = *((u_long*)TEMP_AREA + 1);
+	#if DEBUG
+	printf("VFS: %s Load Location: %x\n",vfsfile,TEMP_AREA);
+	printf("VFS Sectors to load: %i Titles in VFS:%i\n", sect, titlenum);
+	#endif
+	if (sect > 1) {
+		CdIntToPos(CdPosToInt(&cdf.pos) + 1, &cdf.pos);
+		CdControl(CdlSetloc, (u_char*)&cdf.pos, 0);
+		CdRead(sect - 1, (u_long*)CONT_AREA, CdlModeSpeed);
+		CdReadSync(0, 0);
+	}
+	for (i=0; i<titlenum; i++) {
+		Title[i].StackAddr = titles[i].stack;
+		Title[i].SectorStart = titles[i].addr;
+		Title[i].SectorLength = titles[i].sector_size;
+		sprintf(Title[i].Name, "%s", titles[i].name);
+		sprintf(Title[i].ExecFile, "%s", vfsfile);
+		#if DEBUG
+		printf("Title Area: %X\n", titles);
+		printf("Title %i - Stack %x - Start Sector %i - Size %i\nName %s\nFilename%s\n",i,Title[i].StackAddr,Title[i].SectorStart,Title[i].SectorLength,Title[i].Name,Title[i].ExecFile);
+		#endif
+	}
+	NumTitles = titlenum;
+	
+}
+
+void InitTitles(char* titlefile, u_long ssect, u_long nsect) {
 	
 	
-	int		i=0,InQuote=0,TitleNum=0,GrabStep=0,Separator=0,CharNum=0;
+	int		i=0,InQuote=0,TitleNum=0,GrabStep=0,Separator=0,CharNum=0,j=0;
 	
 	char	AddrText[16]={0};
-	char	TextBuff[LISTFILE_MAXSIZE]={0};
+	//char	TextBuff[LISTFILE_MAXSIZE]={0};
+	char*	TextBuff=(char*)TEMP_AREA;
 	
 	#if DEBUG
-	printf("Loading TITLES.TXT...");
+	printf("Loading %s...", titlefile);
 	#endif
 	
 	// Load LIST.TXT
-	CdReadFile("\\TITLES.TXT", (u_long*)TextBuff, 0);
+	//CdReadFile(titlefile, (u_long*)TextBuff, 0);
+	CDRF(titlefile, (u_long*)TextBuff, ssect, nsect);
 	CdReadSync(0, 0);
 	
+	for (j=0;j<52;j++) {
+		Title[0].ExecFile[j] = '\0';
+	}
+	for (j=0;j<64;j++) {
+		Title[0].Name[j] = '\0';
+	}
+
 	
 	// Scan the file's text
 	for (i=0; TextBuff[i] != 128; i+=1) {
@@ -889,7 +1109,7 @@ void InitTitles() {
 		} else {
 			
 			if (TextBuff[i] == '"') {	// If quote detected, end character grabbing
-			
+			/*
 				if (GrabStep == 0) {
 					GrabStep = 1;
 				} else if (GrabStep == 1) {
@@ -899,7 +1119,30 @@ void InitTitles() {
 					Title[TitleNum].StackAddr = hex2int(AddrText);
 					TitleNum += 1;
 				}
-				
+			*/	
+				switch (GrabStep) {
+					case 0:
+						GrabStep = 1;
+						break;
+					case 1:
+						GrabStep = 2;
+						break;
+					case 2:
+						GrabStep = 0;
+						Title[TitleNum].StackAddr = hex2int(AddrText);
+						TitleNum += 1;
+						for (j=0;j<52;j++) {
+							Title[TitleNum].ExecFile[j] = '\0';
+						}
+						for (j=0;j<64;j++) {
+							Title[TitleNum].Name[j] = '\0';
+						}
+						Title[TitleNum].SectorStart = 0;
+						Title[TitleNum].SectorLength = 0;
+						break;
+					default:
+						break;
+					}
 				InQuote = false;
 				
 			} else {
@@ -1110,81 +1353,108 @@ int StopMusic (u_long filetype) {
 
 int ChangeMusic (TITLESTRUCT file) {
 	//int strackvol;
+		
 		switch (file.StackAddr) {
 		case MUSIC_NONE:
 			return 0;
 			break;
 		case MUSIC_MOD:
-			CdReadFile(file.ExecFile, (u_long*)MOD_AREA, 0);
+			CDRF(file.ExecFile, (u_long*)MOD_AREA, file.SectorStart, file.SectorLength);
 			CdReadSync(0, 0);
 			MOD_Load((u_char*)MOD_AREA);
 			MOD_Start();
 			return 0;
 			break;
 		case MUSIC_SEQ:
-			CdReadFile(file.ExecFile, (u_long*)MOD_AREA, 0);
+			CDRF(file.ExecFile, (u_long*)MOD_AREA, file.SectorStart, file.SectorLength);
 			CdReadSync(0, 0);
-			vab1 = SsVabOpenHead ((unsigned char*)QLPfilePtr((u_long*)MOD_AREA, 1), -1);
-			#if DEBUG
-				if( vab1 == -1 ) {
-				printf("Failed to open VH!\n");
-				}
-			#endif
-			vab1 = SsVabTransBody ((unsigned char*)QLPfilePtr((u_long*)MOD_AREA, 2), vab1);
-			#if DEBUG
-				if( vab1 == -1 ) {
-				printf("Failed to open VB!\n");
-				}
-			#endif
-			SsVabTransCompleted (SS_WAIT_COMPLETED);
-			SsStart();
-			seq1 = SsSeqOpen ((unsigned long*)QLPfilePtr((u_long*)MOD_AREA, 0), vab1);
-			SsSetMVol (127, 127);
-			SsSeqSetVol (seq1, 127, 127);
-			SsSeqPlay(seq1, SSPLAY_PLAY, SSPLAY_INFINITY);
-			return 0;
+			return LoadSeq((u_long*)MOD_AREA, 0, 0);
 			break;
 		case MUSIC_SEP:
-			CdReadFile(file.ExecFile, (u_long*)MOD_AREA, 0);
-			CdReadSync(0, 0);
-			vab1 = SsVabOpenHead ((unsigned char*)QLPfilePtr((u_long*)MOD_AREA, 1), -1);
-			#if DEBUG
-				if( vab1 == -1 ) {
-				printf("Failed to open VH\n");
-				}
-			#endif
-			vab1 = SsVabTransBody ((unsigned char*)QLPfilePtr((u_long*)MOD_AREA, 2), vab1);
-			#if DEBUG
-				if( vab1 == -1 ) {
-				printf("Failed to open VB\n");
-				}
-			#endif
-			SsVabTransCompleted (SS_WAIT_COMPLETED);
-			SsStart();
-			septrk = ((short)*QLPfilePtr((u_long*)MOD_AREA, 3));
-			#if DEBUG
-			printf("SEP Track Number Loaded to %X with %hi tracks\n",QLPfilePtr((u_long*)MOD_AREA, 3),septrk);
-			//septrk=3;
-			#endif
-			sep1 = SsSepOpen ((unsigned long*)QLPfilePtr((u_long*)MOD_AREA, 0), vab1, septrk);
-			#if DEBUG
-			printf("SEP Opened at %X\n",QLPfilePtr((u_long*)MOD_AREA, 0));
-			#endif
-			SsSetMVol (127, 127);
-			for (curtrk = 0; curtrk < septrk; curtrk++) {
-			SsSepSetVol (sep1, curtrk, 127, 127); //indenting didnt work dont know why
-			#if DEBUG
-			printf("SEP Track %hi Volume Set\n",curtrk);
-			#endif
-			}
-			curtrk = 0;
-			SsSepPlay(sep1, curtrk, SSPLAY_PLAY, SSPLAY_INFINITY);
-			return 0;
+			return LoadSep(file.ExecFile, (u_long*)MOD_AREA, file.SectorStart, file.SectorLength, 0);
 			break;
 		default:
 			return 1;
 		}
 	
+}
+
+int LoadSep (char* name, u_long* addr, u_long ssect, u_long nsect, short ptrack) {
+	CDRF(name, addr, ssect, nsect);
+	CdReadSync(0, 0);
+	vab1 = SsVabOpenHead ((unsigned char*)QLPfilePtr(addr, 1), -1);
+	#if DEBUG
+		if( vab1 == -1 ) {
+			printf("Failed to open VH\n");
+		}
+	#endif
+	vab1 = SsVabTransBody ((unsigned char*)QLPfilePtr(addr, 2), vab1);
+	#if DEBUG
+	if( vab1 == -1 ) {
+		printf("Failed to open VB\n");
+	}
+	#endif
+	SsVabTransCompleted (SS_WAIT_COMPLETED);
+	SsStart();
+	septrk = ((short)*QLPfilePtr(addr, 3));
+	#if DEBUG
+	printf("SEP Track Number Loaded to %X with %hi tracks\n",QLPfilePtr(addr, 3),septrk);
+	//septrk=3;
+	#endif
+	sep1 = SsSepOpen ((unsigned long*)QLPfilePtr(addr, 0), vab1, septrk);
+	#if DEBUG
+	printf("SEP Opened at %X\n",QLPfilePtr(addr, 0));
+	#endif
+	SsSetMVol (127, 127);
+	for (curtrk = 0; curtrk < septrk; curtrk++) {
+		SsSepSetVol (sep1, curtrk, vol, vol);
+		#if DEBUG
+		printf("SEP Track %hi Volume Set\n",curtrk);
+		#endif
+	}
+	curtrk = ptrack;
+	SsSepPlay(sep1, curtrk, SSPLAY_PLAY, SSPLAY_INFINITY);
+	return 0;
+}
+
+short LoadSeq (u_long* addr, short ptrack, int extfiles) {
+	
+	vab1 = SsVabOpenHead ((unsigned char*)QLPfilePtr(addr, (QLPfileCount(addr) - 2) - extfiles), -1);
+	#if DEBUG
+		if( vab1 == -1 ) {
+		printf("Failed to open VH!\n");
+		}
+	#endif
+	vab1 = SsVabTransBody ((unsigned char*)QLPfilePtr(addr, (QLPfileCount(addr) - 1) - extfiles), vab1);
+	#if DEBUG
+		if( vab1 == -1 ) {
+		printf("Failed to open VB!\n");
+		}
+	#endif
+	SsVabTransCompleted (SS_WAIT_COMPLETED);
+	SsStart();
+	seq1 = SsSeqOpen ((unsigned long*)QLPfilePtr(addr, ptrack), vab1);
+	SsSetMVol (127, 127);
+	SsSeqSetVol (seq1, vol, vol);
+	SsSeqPlay(seq1, SSPLAY_PLAY, SSPLAY_INFINITY);
+	septrk = (QLPfileCount(addr) - 2) - extfiles;
+	curtrk = ptrack;
+	#if DEBUG
+		printf("Tracks Total: %hi Track Selected: %hi File Count: %i\n", septrk, curtrk, QLPfileCount(addr));
+	#endif
+	return 0;
+}
+
+int str_n_cmp (char* str1, char* str2, int len) {
+	int i;
+	for (i = 0; i < len; i++) {
+		if (str1[i] != str2[i]) {
+			return i;
+		} else if (str1[i] == 0x00) {
+			return 0;
+		}
+	}
+	return 0;
 }
 
 int UnloadMusic (u_long filetype) {
@@ -1288,7 +1558,14 @@ short ChangeTrack (short nowtrack, u_long filetype) {
 	switch (filetype) {
 		case MUSIC_NONE:
 		case MUSIC_MOD:
+			return nowtrack;
+			break;
 		case MUSIC_SEQ:
+			SsSeqClose (seq1);
+			seq1 = SsSeqOpen ((unsigned long*)QLPfilePtr((u_long*)MOD_AREA, nowtrack), vab1);
+			SsSetMVol (127, 127);
+			SsSeqSetVol (seq1, vol, vol);
+			SsSeqPlay(seq1, SSPLAY_PLAY, SSPLAY_INFINITY);
 			return nowtrack;
 			break;
 		case MUSIC_SEP:
@@ -1301,4 +1578,39 @@ short ChangeTrack (short nowtrack, u_long filetype) {
 			break;
 		}
 	return nowtrack;
+}
+
+short ChangeVol (short nowvol, u_long filetype) {
+	switch (filetype) {
+		case MUSIC_NONE:
+		case MUSIC_MOD:
+		case MUSIC_SEQ:
+			SsSeqSetVol (seq1, nowvol, nowvol);
+			return nowvol;
+			break;
+		case MUSIC_SEP:
+			SsSepSetVol (sep1, curtrk, nowvol, nowvol);
+			return nowvol;
+			break;
+		default:
+			return nowvol;
+			break;
+		}
+	return nowvol;
+}
+
+int CDRF(char* file, u_long *addr, u_long startsect, u_long nsect) {
+	CdlFILE cdlf;
+	if (startsect == 0) {
+		return CdReadFile(file, addr, nsect * 2048);
+	} else {
+		sprintf(StringBuff, "%s;1", file);
+		if (CdSearchFile(&cdlf, StringBuff) == 0) {
+			printf("Subfile not found: %s\n", file);
+			return -1;
+		}
+		CdIntToPos(CdPosToInt(&cdlf.pos) + startsect, &cdlf.pos);
+		CdControl(CdlSetloc, (u_char*)&cdlf.pos, 0);
+		return CdRead(nsect, addr, CdlModeSpeed);
+	}
 }
