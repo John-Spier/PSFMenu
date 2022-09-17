@@ -1,7 +1,7 @@
 "Multi-Sequence PSQ - VFS Test"	"\PSQPACK.VFS"	"FFFFFFFE"
 "EXE Test - Alternate Menu" 	"\TEST1.EXE" 	"801FFFF0"
 "HitMod Test"	"\MUSIC.HIT"	"FFFFFF01"
-"SEQ Test"	"\SINFONIE.PSQ"	"FFFFFFFE"
+"SEQ Test"	"\SINFONIE.PSQ"	"FFFFFF03"
 "SEP Test"	"\SAMPLE.PSP"	"FFFFFF04"
 "Stop Music"	"STOP"	"FFFFFF00"
 €
