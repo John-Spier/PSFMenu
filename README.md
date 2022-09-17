@@ -31,7 +31,7 @@ FFFFFFXX is the base "address", and XX is the type of file.
 
 01 = HITMOD mod file converted with modconv.
 
-03 = SEQ, VH, VB files packed to [QLP](https://github.com/John-Spier/QLPTool) format.
+03 = SEQ, (SEQ, SEQ, SEQ,...) VH, VB files packed to [QLP](https://github.com/John-Spier/QLPTool) format.
 
 04 = SEP, VH, VB, TRACKNUM files packed to [QLP](https://github.com/John-Spier/QLPTool) format.
 
