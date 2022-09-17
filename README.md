@@ -40,3 +40,6 @@ FE = [VFS](https://github.com/John-Spier/VFSTool) submenu.
 FF = TXT submenu.
 
 01000000 - 0100FFFF is a packed SEP file, automatically selecting the track based on the stack location.
+
+01010000 - 0101FFFF is a packed SEQ file, automatically selecting the track based on the stack location.
+
