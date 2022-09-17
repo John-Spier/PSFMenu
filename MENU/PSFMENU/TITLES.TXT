@@ -9,9 +9,9 @@ out in a specific order as shown in this sample.
 "VFS Test"	"\PSQPACK.VFS"	"FFFFFFFE"
 "Stop Music"	"STOP"	"FFFFFF00"
 "HitMod Test"	"\MUSIC.HIT"	"FFFFFF01"
-"SEQ Test"	"\SINFONIE.PSQ"	"FFFFFFFE"
+"SEQ Test"	"\SINFONIE.PSQ"	"FFFFFF03"
 "SEP Test"	"\SAMPLE.PSP"	"FFFFFF04"
-
+"Title Menu Test"	"\TITLES2.TXT"	"FFFFFFFF"
 € <- End of file character (entered by typing Alt+0128).
      Everything after this character is completely ignored.
 
