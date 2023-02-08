@@ -45,9 +45,9 @@ Right = Reverb feedback up
 
 ○ = Change reverb type
 
-L1 = Previous track
+L1 = Reverb depth down
 
-R1 = Next track
+R1 = Reverb depth up
 
 L2 = Reverb volume down
 
