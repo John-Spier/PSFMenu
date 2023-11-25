@@ -1204,6 +1204,7 @@ void DoMenu() {
 	// Begin loading the EXE file in the background and get its parameters
 	sprintf(StringBuff, "%s;1", Title[SelTitle].ExecFile);
 	sprintf(NameBuff, "%s", Title[SelTitle].Name);
+
 	if (LoadEXEfile(StringBuff, &ExeParams, Title[SelTitle].SectorStart, Title[SelTitle].SectorLength) == 0) LoadError=true;
 	
 	
@@ -1596,6 +1597,8 @@ void InitTitles(char* titlefile, u_long ssect, u_long nsect) {
 		Title[0].Name[j] = '\0';
 	}
 
+	Title[0].SectorStart = 0;
+	Title[0].SectorLength = 0;
 	
 	// Scan the file's text
 	for (i=0; TextBuff[i] != 128; i+=1) {
@@ -2338,7 +2341,7 @@ short LoadPostParams(PARAMS_HEADER* addr) {
 		
 			p.Version = ((PARAMS_V1*)addr)->Version;	
 			p.RvolL = ((PARAMS_V1*)addr)->RvolL;
-			p.RvolR = ((PARAMS_V1*)addr)->MvolR;
+			p.RvolR = ((PARAMS_V1*)addr)->RvolR;
 			p.RdepthL = ((PARAMS_V1*)addr)->RdepthL;
 			p.RdepthR = ((PARAMS_V1*)addr)->RdepthR;
 			p.Rdelay = ((PARAMS_V1*)addr)->Rdelay;
