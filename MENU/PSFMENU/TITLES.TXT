@@ -11,6 +11,10 @@ out in a specific order as shown in this sample.
 "HitMod Test"	"\MUSIC.HIT"	"FFFFFF01"
 "SEQ Test"	"\SINFONIE.PSQ"	"FFFFFF03"
 "SEP Test"	"\SAMPLE.PSP"	"FFFFFF04"
+"VAG Test"	"\TEST1.VAG" "FFFFFF05"
+"CDXA Test" "\8TUNES.XA" "FFFFFF06"
+"CDDA Test" "00000001" "FFFFFF07"
+
 "Title Menu Test"	"\TITLES2.TXT"	"FFFFFFFF"
 € <- End of file character (entered by typing Alt+0128).
      Everything after this character is completely ignored.
