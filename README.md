@@ -97,6 +97,12 @@ FFFFFFXX is the base "address", and XX is the type of file.
 
 04 = SEP, VH, VB, TRACKNUM files packed to [QLP](https://github.com/John-Spier/QLPTool) format.
 
+05 = VAG sound file.
+
+06 = XA audio file.
+
+07 = CD Audio track.
+
 FE = [VFS](https://github.com/John-Spier/VFSTool) submenu.
 
 FF = TXT submenu.
@@ -104,3 +110,5 @@ FF = TXT submenu.
 01000000 - 0100FFFF is a packed SEP file, automatically selecting the track based on the stack location.
 
 01010000 - 0101FFFF is a packed SEQ file, automatically selecting the track based on the stack location.
+
+00FFFF00 - 00FFFFFF is a multi-track XA file, automatically selecting the track based on the stack location.
