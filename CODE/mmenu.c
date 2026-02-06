@@ -40,7 +40,7 @@
 #include <kernel.h>
 #include <rand.h>
 #include <libsnd.h>
-
+#include <libspu.h>
 
 #include "hitmod.h"
 
@@ -48,7 +48,7 @@
 #define false		0
 
 #define CENTERED	0x7FFF
-
+#define MALLOC_MAX	3
 
 // Toggles debug mode
 #define DEBUG	false
@@ -78,12 +78,32 @@
 #define PACKETMAX	2048
 #define PACKETMAX2	PACKETMAX*24
 
+#define SWAP_ENDIAN32(x) (((x)>>24) | (((x)>>8) & 0xFF00) | (((x)<<8) & 0x00FF0000) | ((x)<<24))
+
 //files playable
 #define MUSIC_NONE 0xFFFFFF00
 #define MUSIC_MOD 0xFFFFFF01
 #define MUSIC_XM 0xFFFFFF02
 #define MUSIC_SEQ 0xFFFFFF03
 #define MUSIC_SEP 0xFFFFFF04
+#define MUSIC_VAG 0xFFFFFF05
+#define MUSIC_XA 0xFFFFFF06
+#define MUSIC_DA 0xFFFFFF07
+#define MUSIC_TIM 0xFFFFFF08
+#define MUSIC_EXE 0xFFFFFF09
+#define MUSIC_STR 0xFFFFFF0A
+#define MUSIC_STR1X 0xFFFFFF0B
+#define MUSIC_STR2X 0xFFFFFF0C
+#define MUSIC_XA1X 0xFFFFFF0D
+#define MUSIC_XA2X 0xFFFFFF0E
+#define MUSIC_VAB 0xFFFFFF0F
+#define MUSIC_NEWSEQ 0xFFFFFF10
+#define MUSIC_SEQONLY 0xFFFFFF11
+#define MUSIC_PARAMS 0xFFFFFF12
+#define MUSIC_NEWEXE 0xFFFFFF13 //load stack+size from file
+#define MUSIC_ZEROEXE 0xFFFFFF14 //load stack, not size from file
+#define XA_MIN 0x00FFFF00
+#define XA_MAX 0x00FFFFFF
 
 #define SEP_MIN 0x01000000
 #define SEP_MAX 0x0100FFFF
@@ -96,6 +116,7 @@
 #define MENU_TXTVFS 0xFFFFFFFFD
 #define MENU_VFS 0xFFFFFFFE
 #define MENU_TXT 0xFFFFFFFF
+
 
 // Ordering tables and packet buffers for the graphics system
 GsOT 		myOT[2];
@@ -131,6 +152,19 @@ u_char CharWidth[] = {
 	14	,14	,13	,12	,12	,14	,14	,14	,13	,13	,14	,10	,6	,10	,16	,16
 };
 
+
+
+typedef struct {		// All the values in this header must be big endian
+        char id[4];			    // VAGp         4 bytes -> 1 char * 4
+        unsigned int version;          // 4 bytes
+        unsigned int reserved;         // 4 bytes
+        unsigned int dataSize;         // (in bytes) 4 bytes
+        unsigned int samplingFrequency;// 4 bytes
+        char  reserved2[12];    // 12 bytes -> 1 char * 12
+        char  name[16];         // 16 bytes -> 1 char * 16
+        // Waveform data after that
+} VAGhdr;
+
 typedef struct {
 	short SeqNum;
 	short Version;
@@ -164,6 +198,21 @@ typedef struct {
 	int 	SectorLength;
 } TITLESTRUCT;
 
+typedef struct {
+	u_char sector[3];
+	u_char mode;
+	u_char file;
+	u_char channel;
+	u_char submode;
+	u_char code;
+	u_char file_b;
+	u_char channel_b;
+	u_char submode_b;
+	u_char code_b;
+	u_char data[2324];
+	int DUMMY;
+} XASECTOR;
+
 //TITLESTRUCT Title[MAX_TITLES]={0};
 TITLESTRUCT* Title=(TITLESTRUCT*)MENU_AREA;
 
@@ -176,6 +225,7 @@ int		LSMI=MAX_TITLES + 1;
 
 PARAMS_V1 p;
 //short vol = 127;
+u_long vag1;
 short seq1;  /* SEQ data id */
 short sep1;  /* SEP data id */
 short vab1;  /* VAB data id */
@@ -183,8 +233,8 @@ short septrk;
 short curtrk;
 
 //char seq_table[SS_SEQ_TABSIZ * 4 * 5];
-char seq_table[SS_SEQ_TABSIZ * 2 * 16];
-
+char seq_table[SS_SEQ_TABSIZ * 1 * 16];
+char spu_malloc_rec [SPU_MALLOC_RECSIZ * (MALLOC_MAX + 3)];
 
 // For launching an EXE
 struct EXEC ExeParams;
@@ -229,8 +279,8 @@ void InitVfs(char* vfsfile);
 int CDRF(char* file, u_long *addr, u_long startsect, u_long nsect);
 int LoadSep (char* name, u_long* addr, u_long ssect, u_long nsect, short ptrack);
 short LoadSeq (u_long* addr, short ptrack, int extfiles);
-int str_n_cmp (char* str1, char* str2, int len);
 PARAMS_V1 ParamsV1ToDefault();
+int CDReverbEnable();
 
 int SeqParamCount (u_long* addr);
 short LoadPreParams(PARAMS_HEADER* addr);
@@ -249,6 +299,14 @@ short DecRDepths (u_long MusType);
 short ChangeRDepth (short nowvolL, short nowvolR, u_long filetype);
 short ChangeDelay (short nowfbdel, u_long filetype);
 short ChangeFeedback (short nowfbdel, u_long filetype);
+
+void cbready(int intr, u_char *result);
+short LoadXA (char* name, short ptrack, int trackswitch);
+char XASpeed(CdlLOC fp, XASECTOR* buf, int sect, u_char file, u_char channel);
+
+CdlCB Oldcallback;
+CdlLOC XAPos;
+char cdspeed;
 //int TimeoutFrames (short revmode);
 
 // Include my custom little libraries
@@ -266,15 +324,20 @@ int main() {
 	
 
 	// Set stack
-	ExeParams.s_addr = Title[SelTitle].StackAddr;
-	ExeParams.s_size = 0;
-	
+	if (Title[SelTitle].StackAddr != MUSIC_NEWEXE && Title[SelTitle].StackAddr != MUSIC_ZEROEXE)
+	{
+		ExeParams.s_addr = Title[SelTitle].StackAddr;
+	}
+	if (Title[SelTitle].StackAddr != MUSIC_NEWEXE)
+	{
+		ExeParams.s_size = 0;
+	}
 	// Clear the entire framebuffer to avoid possible graphical glitches
 	ClearImage2(&ClearRect, 0, 0, 0);
 	DrawSync(0);
 	
 	#if DEBUG
-	printf("Stack set to: %x\n", ExeParams.s_addr);
+	printf("Stack set to: %X\n", (u_long)ExeParams.s_addr);
 	printf("Execute!\n");
 	#endif
 	
@@ -312,6 +375,7 @@ void DoMenu() {
 	
 	u_long  MusType=MUSIC_NONE;
 	int    MusPlaying=false;
+	
 	
 	PARAMS_HEADER* ParamPtr = 0;
 	
@@ -355,7 +419,6 @@ void DoMenu() {
 	fListY = -((ONE * ((18 * (MaxListLength)))) + 15);
 	fBannerY = -(ONE * 200);
 	
-	
 	// Play the MOD music
 	/*
 	MOD_Init();
@@ -379,12 +442,190 @@ void DoMenu() {
 
 			//printf("PAD %i\n",PadStatus);
 			//select nothing
-			if (PadStatus == 0 || PadStatus == PADRleft || PadStatus == PADRup) {
+			if (PadStatus == 0 || PadStatus == PADRleft || PadStatus == PADRup || PadStatus == (PADRup | PADRleft)) {
 				padPressed = 0;
 				padPressedCount = 0;
 			}
+			if (PadStatus & (PADRup | PADRleft))
+			{
+				if (PadStatus & PADLup) {
+					if (Title[SelTitle].StackAddr < 0xFFFFFFFF) {
+						if (padPressed != PADLup + PADRup + PADRleft) {	
+						Title[SelTitle].StackAddr++;
+						padPressedCount = 0;
+						}
+						if (padPressedCount >= 32)	padPressedCount = 30;
+						if (padPressedCount == 30)	Title[SelTitle].StackAddr++;
+						padPressedCount += 1;
+					}
+					padPressed = PADLup + PADRup + PADRleft;
+					#if DEBUG
+					printf("StackAddr for title %i (%s) is %X\n", SelTitle, Title[SelTitle].ExecFile, Title[SelTitle].StackAddr);
+					#endif
+				}
+				if (PadStatus & PADLdown) {
+					if (Title[SelTitle].StackAddr > 0) {
+						if (padPressed != PADLdown + PADRup + PADRleft) {	
+						Title[SelTitle].StackAddr--;
+						padPressedCount = 0;
+						}
+						if (padPressedCount >= 32)	padPressedCount = 30;
+						if (padPressedCount == 30)	Title[SelTitle].StackAddr--;
+						padPressedCount += 1;
+					}
+					padPressed = PADLdown + PADRup + PADRleft;
+					#if DEBUG
+					printf("StackAddr for title %i (%s) is %X\n", SelTitle, Title[SelTitle].ExecFile, Title[SelTitle].StackAddr);
+					#endif
+				}
+				if (PadStatus & PADLright) {
+					if (Title[SelTitle].StackAddr < 0xFFFFFFF6) {
+						if (padPressed != PADLright + PADRup + PADRleft) {	
+						Title[SelTitle].StackAddr+=10;
+						padPressedCount = 0;
+						}
+						if (padPressedCount >= 32)	padPressedCount = 30;
+						if (padPressedCount == 30)	Title[SelTitle].StackAddr+=10;
+						padPressedCount += 1;
+					} else if (Title[SelTitle].StackAddr < 0xFFFFFFFF) {
+						Title[SelTitle].StackAddr = 0xFFFFFFFF;
+						padPressedCount += 1;
+					}
+					padPressed = PADLright + PADRup + PADRleft;
+					#if DEBUG
+					printf("StackAddr for title %i (%s) is %X\n", SelTitle, Title[SelTitle].ExecFile, Title[SelTitle].StackAddr);
+					#endif
+				}
+				if (PadStatus & PADLleft) {
+					if (Title[SelTitle].StackAddr > 9) {
+						if (padPressed != PADLleft + PADRup + PADRleft) {	
+						Title[SelTitle].StackAddr-=10;
+						padPressedCount = 0;
+						}
+						if (padPressedCount >= 32)	padPressedCount = 30;
+						if (padPressedCount == 30)	Title[SelTitle].StackAddr-=10;
+						padPressedCount += 1;
+					} else if (Title[SelTitle].StackAddr > 1) {
+						Title[SelTitle].StackAddr = 0;
+						padPressedCount += 1;
+					}
+					padPressed = PADLleft + PADRup + PADRleft;
+					#if DEBUG
+					printf("StackAddr for title %i (%s) is %X\n", SelTitle, Title[SelTitle].ExecFile, Title[SelTitle].StackAddr);
+					#endif
+				}
+				if (PadStatus & PADRdown) {
+					if (padPressed != PADRdown + PADRup + PADRleft) {	
+						Title[SelTitle].StackAddr = MUSIC_NEWEXE;
+						padPressedCount = 0;
+					}
+					padPressedCount += 1;
+					padPressed = PADRright + PADRup + PADRleft;
+					#if DEBUG
+					printf("StackAddr for title %i (%s) is %X\n", SelTitle, Title[SelTitle].ExecFile, Title[SelTitle].StackAddr);
+					#endif
+					TitleChosen = true;
+					TransCount = 0;
+					break;
+				}
+				if (PadStatus & PADRright) {
+					if (padPressed != PADRright + PADRup + PADRleft) {	
+						Title[SelTitle].StackAddr = MUSIC_ZEROEXE;
+						padPressedCount = 0;
+					}
+					padPressedCount += 1;
+					padPressed = PADRright + PADRup + PADRleft;
+					#if DEBUG
+					printf("StackAddr for title %i (%s) is %X\n", SelTitle, Title[SelTitle].ExecFile, Title[SelTitle].StackAddr);
+					#endif
+					TitleChosen = true;
+					TransCount = 0;
+					break;
+				}
+				if (PadStatus & PADRdown) {
+					if (padPressed != PADRdown + PADRup + PADRleft) {	
+						Title[SelTitle].StackAddr = MUSIC_NEWEXE;
+						padPressedCount = 0;
+					}
+					padPressedCount += 1;
+					padPressed = PADRdown + PADRup + PADRleft;
+					#if DEBUG
+					printf("StackAddr for title %i (%s) is %X\n", SelTitle, Title[SelTitle].ExecFile, Title[SelTitle].StackAddr);
+					#endif
+					TitleChosen = true;
+					TransCount = 0;
+					break;
+				}
+				if (PadStatus & PADselect) {
+					if (padPressed != PADselect + PADRup + PADRleft) {	
+						Title[SelTitle].StackAddr = MUSIC_ZEROEXE;
+						padPressedCount = 0;
+					}
+					padPressedCount += 1;
+					padPressed = PADselect + PADRup + PADRleft;
+					#if DEBUG
+					printf("StackAddr for title %i (%s) is %X\n", SelTitle, Title[SelTitle].ExecFile, Title[SelTitle].StackAddr);
+					#endif
+				}
+				if (PadStatus & PADstart) {
+					if (padPressed != PADstart + PADRup + PADRleft) {	
+						Title[SelTitle].StackAddr = MUSIC_NEWEXE;
+						padPressedCount = 0;
+					}
+					padPressedCount += 1;
+					padPressed = PADstart + PADRup + PADRleft;
+					#if DEBUG
+					printf("StackAddr for title %i (%s) is %X\n", SelTitle, Title[SelTitle].ExecFile, Title[SelTitle].StackAddr);
+					#endif
+				}
+				if (PadStatus & PADL1) {
+					if (padPressed != PADL1 + PADRup + PADRleft) {	
+						Title[SelTitle].StackAddr = 0x801FFFF0;
+						padPressedCount = 0;
+					}
+					padPressedCount += 1;
+					padPressed = PADL1 + PADRup + PADRleft;
+					#if DEBUG
+					printf("StackAddr for title %i (%s) is %X\n", SelTitle, Title[SelTitle].ExecFile, Title[SelTitle].StackAddr);
+					#endif
+				}
+				if (PadStatus & PADR1) {
+					if (padPressed != PADR1 + PADRup + PADRleft) {	
+						Title[SelTitle].StackAddr = MUSIC_DA;
+						sprintf(Title[SelTitle].ExecFile, "00000002");
+						padPressedCount = 0;
+					}
+					padPressedCount += 1;
+					padPressed = PADR1 + PADRup + PADRleft;
+					#if DEBUG
+					printf("StackAddr for title %i (%s) is %X\n", SelTitle, Title[SelTitle].ExecFile, Title[SelTitle].StackAddr);
+					#endif
+				}
+				if (PadStatus & PADL2) {
+					if (padPressed != PADL2 + PADRup + PADRleft) {	
+						Title[SelTitle].StackAddr = MUSIC_NONE;
+						padPressedCount = 0;
+					}
+					padPressedCount += 1;
+					padPressed = PADL2 + PADRup + PADRleft;
+					#if DEBUG
+					printf("StackAddr for title %i (%s) is %X\n", SelTitle, Title[SelTitle].ExecFile, Title[SelTitle].StackAddr);
+					#endif
+				}
+				if (PadStatus & PADR2) {
+					if (padPressed != PADR2 + PADRup + PADRleft) {	
+						Title[SelTitle].StackAddr = MENU_TXT;
+						padPressedCount = 0;
+					}
+					padPressedCount += 1;
+					padPressed = PADR2 + PADRup + PADRleft;
+					#if DEBUG
+					printf("StackAddr for title %i (%s) is %X\n", SelTitle, Title[SelTitle].ExecFile, Title[SelTitle].StackAddr);
+					#endif
+				}
+			}
 			// While holding triangle
-			if (PadStatus & PADRup) {
+			else if (PadStatus & PADRup) {
 				//#if DEBUG
 				// Select Loops Up
 				if (PadStatus & PADR2) {
@@ -725,7 +966,17 @@ void DoMenu() {
 				if (PadStatus & PADselect) {
 					if (padPressed != PADselect + PADRleft) {
 						padPressedCount=0;
-						SsSetMono();
+						switch (MusType) {
+							case MUSIC_SEQ:
+							case MUSIC_SEP:
+								SsSetMono();
+								break;
+							case MUSIC_DA:
+							case MUSIC_XA:
+								break;
+							default:
+								break;
+						}
 					}
 					padPressedCount += 1;
 					padPressed = PADselect + PADRleft;
@@ -733,7 +984,17 @@ void DoMenu() {
 				if (PadStatus & PADstart) {
 					if (padPressed != PADstart + PADRleft) {
 						padPressedCount=0;
-						SsSetStereo();
+						switch (MusType) {
+							case MUSIC_SEQ:
+							case MUSIC_SEP:
+								SsSetStereo();
+								break;
+							case MUSIC_DA:
+							case MUSIC_XA:
+								break;
+							default:
+								break;
+						}
 					}
 					padPressedCount += 1;
 					padPressed = PADstart + PADRleft;
@@ -929,7 +1190,7 @@ void DoMenu() {
 								CdReadSync(0, 0);
 								ParamPtr = ParamFile(0, (u_long*)MOD_AREA);
 								LSMI = MAX_TITLES + 1;
-							} else if (LSMI <= MAX_TITLES && Title[LSMI].SectorStart == Title[SelTitle].SectorStart && Title[LSMI].SectorLength == Title[SelTitle].SectorLength && str_n_cmp(Title[LSMI].ExecFile, Title[SelTitle].ExecFile, 52) == 0) {
+							} else if (LSMI <= MAX_TITLES && Title[LSMI].SectorStart == Title[SelTitle].SectorStart && Title[LSMI].SectorLength == Title[SelTitle].SectorLength && strncmp(Title[LSMI].ExecFile, Title[SelTitle].ExecFile, 52) == 0) {
 								ParamPtr = ParamFile(Title[SelTitle].StackAddr - SEQ_MIN, (u_long*)MOD_AREA);
 								LSMI = SelTitle;
 							} else {
@@ -955,7 +1216,7 @@ void DoMenu() {
 						}
 					} else {
 						if ((Title[SelTitle].StackAddr >= SEP_MIN) && (Title[SelTitle].StackAddr <= SEP_MAX)) {
-							if (LSMI <= MAX_TITLES && Title[LSMI].SectorStart == Title[SelTitle].SectorStart && Title[LSMI].SectorLength == Title[SelTitle].SectorLength && str_n_cmp(Title[LSMI].ExecFile, Title[SelTitle].ExecFile, 52) == 0) {
+							if (LSMI <= MAX_TITLES && Title[LSMI].SectorStart == Title[SelTitle].SectorStart && Title[LSMI].SectorLength == Title[SelTitle].SectorLength && strncmp(Title[LSMI].ExecFile, Title[SelTitle].ExecFile, 52) == 0) {
 								#if DEBUG
 								printf("Multitrack correct, switching track to %i\n", Title[SelTitle].StackAddr - SEP_MIN);
 								#endif
@@ -978,7 +1239,7 @@ void DoMenu() {
 								LSMI = SelTitle;
 							}
 						} else if ((Title[SelTitle].StackAddr >= SEQ_MIN) && (Title[SelTitle].StackAddr <= SEQ_MAX)) {
-							if (LSMI <= MAX_TITLES && Title[LSMI].SectorStart == Title[SelTitle].SectorStart && Title[LSMI].SectorLength == Title[SelTitle].SectorLength && str_n_cmp(Title[LSMI].ExecFile, Title[SelTitle].ExecFile, 52) == 0) {
+							if (LSMI <= MAX_TITLES && Title[LSMI].SectorStart == Title[SelTitle].SectorStart && Title[LSMI].SectorLength == Title[SelTitle].SectorLength && strncmp(Title[LSMI].ExecFile, Title[SelTitle].ExecFile, 52) == 0) {
 								#if DEBUG
 								printf("Multitrack correct. Switching track to %i\n", Title[SelTitle].StackAddr - SEQ_MIN);
 								#endif
@@ -1037,11 +1298,24 @@ void DoMenu() {
 								//Timeout = TimeoutStart;
 								LSMI = SelTitle;
 							}
+						} else if (Title[SelTitle].StackAddr >= XA_MIN && Title[SelTitle].StackAddr <= XA_MAX) {
+							if (LSMI <= MAX_TITLES && strncmp(Title[LSMI].ExecFile, Title[SelTitle].ExecFile, 52) == 0) {
+								LSMI = SelTitle;
+								LoadXA(Title[SelTitle].ExecFile, Title[SelTitle].StackAddr - XA_MIN, false);
+								MusType = MUSIC_XA;
+							} else {
+								LSMI = SelTitle;
+								LoadXA(Title[SelTitle].ExecFile, Title[SelTitle].StackAddr - XA_MIN, true);
+								MusType = MUSIC_XA;
+							}
 						} else switch (Title[SelTitle].StackAddr) {
 							case MUSIC_NONE:
 							case MUSIC_MOD:
 							case MUSIC_SEQ:
 							case MUSIC_SEP:
+							case MUSIC_VAG:
+							case MUSIC_DA:
+							case MUSIC_XA:
 								#if DEBUG
 								printf("chosen: %s %i\n", Title[SelTitle].ExecFile, Title[SelTitle].StackAddr);
 								#endif
@@ -1491,7 +1765,7 @@ void Init() {
 	GsClearOt(0, 0, &myOT[0]);
 	GsClearOt(0, 0, &myOT[1]);
 	#if DEBUG
-	printf("Title array size: %i Title array location: %X\n", MENU_SIZE, Title);
+	printf("CD Mode: %i Title array size: %i Title array location: %X\n", CdMode(), MENU_SIZE, Title);
 	#endif
 	// Load the menu graphics and title entries
 	LoadGraphics("\\PSFMENU\\GRAPHICS.QLP", 0, 0);
@@ -1563,10 +1837,10 @@ void InitVfs(char* vfsfile) {
 		Title[i].SectorLength = titles[i].sector_size;
 		sprintf(Title[i].Name, "%s", titles[i].name);
 		sprintf(Title[i].ExecFile, "%s", vfsfile);
-		//#if DEBUG
+		#if DEBUG
 		//printf("Title Area: %X\n", titles);
-		//printf("Title %i - Stack %x - Start Sector %i - Size %i\nName %s\nFilename%s\n",i,Title[i].StackAddr,Title[i].SectorStart,Title[i].SectorLength,Title[i].Name,Title[i].ExecFile);
-		//#endif
+		//printf("Title %i - Stack %x - Start Sector %i - Size %i\nName %s\nByteSize: %i ByteAddr: %i\n\n",i,Title[i].StackAddr,Title[i].SectorStart,Title[i].SectorLength,Title[i].Name,titles[i].size,titles[i].byte_addr);
+		#endif
 	}
 	NumTitles = titlenum;
 	
@@ -1576,7 +1850,7 @@ void InitTitles(char* titlefile, u_long ssect, u_long nsect) {
 	
 	
 	int		i=0,InQuote=0,TitleNum=0,GrabStep=0,Separator=0,CharNum=0,j=0;
-	
+	int b=0;
 	char	AddrText[16]={0};
 	//char	TextBuff[LISTFILE_MAXSIZE]={0};
 	char*	TextBuff=(char*)TEMP_AREA;
@@ -1587,8 +1861,9 @@ void InitTitles(char* titlefile, u_long ssect, u_long nsect) {
 	
 	// Load LIST.TXT
 	//CdReadFile(titlefile, (u_long*)TextBuff, 0);
-	CDRF(titlefile, (u_long*)TextBuff, ssect, nsect);
+	b = CDRF(titlefile, (u_long*)TextBuff, ssect, nsect);
 	CdReadSync(0, 0);
+	TextBuff[b]=0;
 	
 	for (j=0;j<52;j++) {
 		Title[0].ExecFile[j] = '\0';
@@ -1601,7 +1876,7 @@ void InitTitles(char* titlefile, u_long ssect, u_long nsect) {
 	Title[0].SectorLength = 0;
 	
 	// Scan the file's text
-	for (i=0; TextBuff[i] != 128; i+=1) {
+	for (i=0; TextBuff[i] != 0; i+=1) {
 		
 		if (InQuote == false) {
 			
@@ -1826,29 +2101,38 @@ u_long StartMusic (TITLESTRUCT* file, u_long currenttype, int PadStatus) {
 }
 
 int StopMusic (u_long filetype) {
+	int loc[2] = {0};
 	#if DEBUG
 	printf("Stopping music type %i\n", filetype);
 	#endif
 	switch (filetype) {
-
 		case MUSIC_NONE:
 			return 0;
-			break;
 		case MUSIC_MOD:
 			MOD_Stop();
 			MOD_Free();
 			return 0;
-			break;
 		case MUSIC_SEQ:
 			SsSeqClose (seq1);
 			SsVabClose (vab1);
+			SpuClearReverbWorkArea(p.Rmode);
 			return 0;
-			break;
 		case MUSIC_SEP:
 			SsSepClose (sep1);
 			SsVabClose (vab1);
+			SpuClearReverbWorkArea(p.Rmode);
 			return 0;
-			break;
+		case MUSIC_VAG:
+			SpuSetKey(SpuOff,SPU_0CH);
+			//SpuFlush(SPU_EVENT_ALL);
+			SpuFree(vag1);
+			return 0;
+		case MUSIC_DA:
+			CdPlay(0, loc, 0);
+			return 0;
+		case MUSIC_XA:
+			CdControlB(CdlPause, 0, 0);
+			return 0;
 		default:
 			return 1;
 	}
@@ -1858,18 +2142,21 @@ int StopMusic (u_long filetype) {
 
 int ChangeMusic (TITLESTRUCT* file, int PadStatus) {
 	//int strackvol;
-	PARAMS_HEADER* ParamPtr = &ParamsNull;	
+	PARAMS_HEADER* ParamPtr = &ParamsNull;
+	SpuVoiceAttr voc_attr;
+	SpuReverbAttr rev_attr;
+	u_long d_size;
+	u_long s_rate;
+	int loc[2] = {0};
 		switch (file->StackAddr) {
 		case MUSIC_NONE:
 			return 0;
-			break;
 		case MUSIC_MOD:
 			CDRF(file->ExecFile, (u_long*)MOD_AREA, file->SectorStart, file->SectorLength);
 			CdReadSync(0, 0);
 			MOD_Load((u_char*)MOD_AREA);
 			MOD_Start();
 			return 0;
-			break;
 		case MUSIC_SEQ:
 			CDRF(file->ExecFile, (u_long*)MOD_AREA, file->SectorStart, file->SectorLength);
 			CdReadSync(0, 0);
@@ -1880,6 +2167,7 @@ int ChangeMusic (TITLESTRUCT* file, int PadStatus) {
 			if (ParamPtr->Version != 0 && PadStatus == 1) {
 				LoadPreParams(ParamPtr);
 			}
+			SsUtReverbOn();
 			LoadSeq((u_long*)MOD_AREA, 0, SeqParamCount((u_long*)MOD_AREA));
 			if (ParamPtr->Version != 0 && PadStatus == 1) {
 				ChangeFeedback(p.Rfeedback, MUSIC_SEQ);
@@ -1890,16 +2178,186 @@ int ChangeMusic (TITLESTRUCT* file, int PadStatus) {
 				} else {
 					ChangeRVol(p.RvolL, p.RvolR, MUSIC_SEQ);
 					ChangeRDepth(p.RdepthL, p.RdepthR, MUSIC_SEQ);
-				}			}
+				}			
+			}
 			return 0;
-			break;
 		case MUSIC_SEP:
+			SsUtReverbOn();
 			return LoadSep(file->ExecFile, (u_long*)MOD_AREA, file->SectorStart, file->SectorLength, 0);
-			break;
+		case MUSIC_VAG:
+			CDRF(file->ExecFile, (u_long*)MOD_AREA, file->SectorStart, file->SectorLength);
+			CdReadSync(0, 0);
+			SpuSetTransferMode(SpuTransByDMA);
+			d_size = *(u_long*)(MOD_AREA + 12);
+			s_rate = *(u_long*)(MOD_AREA + 16);
+			vag1 = SpuMalloc(SWAP_ENDIAN32(d_size));
+			SpuSetTransferStartAddr(vag1);
+			SpuWrite((u_char*)MOD_AREA + sizeof(VAGhdr), SWAP_ENDIAN32(d_size));
+			SpuIsTransferCompleted (SPU_TRANSFER_WAIT);	
+			voc_attr.mask =
+			(
+			  SPU_VOICE_VOLL |
+			  SPU_VOICE_VOLR |
+			  SPU_VOICE_PITCH |
+			  SPU_VOICE_WDSA |
+			  SPU_VOICE_ADSR_AMODE |
+			  SPU_VOICE_ADSR_SMODE |
+			  SPU_VOICE_ADSR_RMODE |
+			  SPU_VOICE_ADSR_AR |
+			  SPU_VOICE_ADSR_DR |
+			  SPU_VOICE_ADSR_SR |
+			  SPU_VOICE_ADSR_RR |
+			  SPU_VOICE_ADSR_SL
+			);
+			voc_attr.voice = SPU_0CH;
+			voc_attr.volume.left = p.VolL << 7;
+			voc_attr.volume.right = p.VolR << 7;
+			voc_attr.pitch = (SWAP_ENDIAN32(s_rate) << 12) / 44100L;
+			voc_attr.addr = vag1;
+			voc_attr.a_mode = SPU_VOICE_LINEARIncN;
+			voc_attr.s_mode = SPU_VOICE_LINEARIncN;
+			voc_attr.r_mode = SPU_VOICE_LINEARDecN;
+			voc_attr.ar = 0x0;
+			voc_attr.dr = 0x0;
+			voc_attr.rr = 0x0;
+			voc_attr.sr = 0x0;
+			voc_attr.sl = 0xf;
+			rev_attr.mask = (
+				SPU_REV_MODE |
+				SPU_REV_DEPTHL |
+				SPU_REV_DEPTHR |
+				SPU_REV_DELAYTIME |
+				SPU_REV_FEEDBACK
+			);
+			rev_attr.mode = p.Rmode;
+			rev_attr.depth.left = p.RdepthL << 7;
+			rev_attr.depth.right = p.RdepthR << 7;
+			rev_attr.delay = p.Rdelay;
+			rev_attr.feedback = p.Rfeedback;
+			SpuSetReverb(SPU_ON);
+			SpuSetReverbModeParam(&rev_attr);
+			SpuSetReverbVoice(SPU_ON, SPU_0CH);
+			SpuSetVoiceAttr(&voc_attr);
+			SpuSetKey(SpuOn,SPU_0CH);	
+			return 0;
+		case MUSIC_DA:
+			loc[0] = hex2int(file->ExecFile);
+			curtrk = loc[0] - 2;
+			CdPlay(1, loc, 0);
+			return 0;
+		case MUSIC_XA:
+			LoadXA(file->ExecFile, 0, true);
+			return 0;
 		default:
 			return 1;
 		}
 	return -1;
+}
+
+char XASpeed(CdlLOC fp, XASECTOR* buf, int sect, u_char file, u_char channel) {
+	int first_pos = -1, second_pos = -1;
+	int base_inter = 8; //8, single speed since all zeroes is mono 37.8 4bit
+	int sectcount = 0;
+	int i;
+	septrk = 0;
+	while (second_pos == -1) {
+		CdControl(CdlSetloc, (u_char*)&fp, 0);
+		CdRead(sect, (u_long*)buf, CdlModeSpeed|CdlModeSize1);
+		CdReadSync(0, 0);
+		for (i = 0; i < sect; i++) {
+			if (buf[i].channel > septrk) {
+				septrk = buf[i].channel;
+			}
+			if (buf[i].submode & 0x04) { //AUDIO BIT
+				if (file == 0xFF) { //Videos use multiple files per channel
+					file = buf[i].file;
+				}
+				if (channel == 0xFF) { //only set file/channel after finding an audio track
+					channel = buf[i].channel;
+				}
+				if (buf[i].file == file && buf[i].channel == channel) {
+					if (first_pos == -1) {
+						first_pos = sectcount;
+						if (buf[i].code & 0x01) { //STEREO
+							base_inter /= 2;
+						}
+						if (buf[i].code & 0x04) { //18.9 KHZ
+							base_inter *= 2;
+						}
+					} else {
+						second_pos = sectcount;
+						break;
+					}
+				}
+			}
+			sectcount++;
+		}
+		if (sectcount == 1000) {
+			return -2;
+		}
+		CdIntToPos(CdPosToInt(&fp) + sect, &fp);
+	}
+	septrk++;
+	#if DEBUG
+		printf("1X Sector Gap: %i, 2X Sector Gap:%i, Channel Count: %i\n", base_inter, base_inter * 2, septrk);
+		printf("First Position: %i Second Position: %i, Interval: %i\n", first_pos, second_pos, second_pos - first_pos);
+	#endif
+	if (second_pos - first_pos == base_inter) {
+		return 0;
+	}
+	if (second_pos - first_pos == base_inter * 2) {
+		return CdlModeSpeed;
+	}
+	return -1;
+}
+
+short LoadXA (char* name, short ptrack, int trackswitch) {
+	CdlFILE  loc;
+	CdlFILTER theFilter;
+	u_char param[4] = {0};
+	
+	theFilter.file=1;
+	theFilter.chan=ptrack;
+	curtrk=ptrack;
+	if (trackswitch) {
+		sprintf(StringBuff, "%s;1", name);
+		if (CdSearchFile(&loc, StringBuff) == 0) {
+			printf("XA file not found: %s\n", name);
+			return -1;
+		}
+		XAPos = loc.pos;
+		cdspeed = XASpeed(loc.pos, (XASECTOR*)TEMP_AREA, 32, 1, ptrack);	
+	}
+	param[0] = cdspeed|CdlModeRT|CdlModeSF|CdlModeSize1;
+	CdControlF(CdlSetfilter, (u_char *)&theFilter);
+	CdControlB(CdlSetmode, param, 0);
+	CdControlF(CdlReadS, (u_char *)&XAPos);
+	return 0;
+}
+
+void cbready(int intr, u_char *result)
+{
+	int ID, currentChannel;
+	u_long *cAddress=(u_long *)TEMP_AREA;
+	if (intr == CdlDataReady)
+	{
+		CdGetSector((u_long *)TEMP_AREA,8);
+		ID = *(unsigned short *)(cAddress+3);
+		// video sector channel number format = 1CCCCC0000000001
+		currentChannel = *((unsigned short *)(cAddress+3)+1);
+		currentChannel = (currentChannel&31744)>>10;
+		//printf("Current DATA Sector: %i\nSector Channel %i Sector ID %i\n", callbacks, currentChannel, ID);
+		// If this is a video sector then check that this is the channel
+	 	// you want then stop playing the .XA sample
+		if( (ID == 352) && (currentChannel == curtrk) )
+		{
+		    CdControlF(CdlPause,0);
+		    //SsSetSerialVol(SS_SERIAL_A,0,0);
+		}
+	}
+	else
+		printf("UnHandled Callback Occured\n");	
+	
 }
 
 int LoadSep (char* name, u_long* addr, u_long ssect, u_long nsect, short ptrack) {
@@ -1969,33 +2427,37 @@ short LoadSeq (u_long* addr, short ptrack, int extfiles) {
 	return 0;
 }
 
-int str_n_cmp (char* str1, char* str2, int len) {
-	int i;
-	for (i = 0; i < len; i++) {
-		if (str1[i] != str2[i]) {
-			return i;
-		} else if (str1[i] == 0x00) {
-			return 0;
-		}
-	}
-	return 0;
-}
-
 int UnloadMusic (u_long filetype) {
-	
+	u_char param[4] = {0};
 	switch (filetype) {
 		case MUSIC_NONE:
 			return 0;
-			break;
 		case MUSIC_MOD:
 			return 0;
-			break;
 		case MUSIC_SEP:
 		case MUSIC_SEQ:
 			SsEnd();
 			SsQuit();
 			return 0;
-			break;
+		case MUSIC_VAG:
+			SpuQuit();
+			return 0;
+		case MUSIC_DA:
+			CdControl(CdlSetmode, param, 0);
+			
+			SsEnd();
+			SsQuit();
+			SpuSetTransStartAddr(421887);
+			SpuWrite0(1024 * 100);
+
+			SpuQuit();
+			return 0;
+		case MUSIC_XA:
+			CdControlB(CdlPause, 0, 0);
+			CdReadyCallback((void *)Oldcallback);
+			param[0] = CdlModeSpeed;
+			CdControlB(CdlSetmode, param, 0);
+			return 0;
 		default:
 			return 1;
 		}
@@ -2004,22 +2466,43 @@ int UnloadMusic (u_long filetype) {
 }
 
 int LoadMusic (u_long filetype) {
-
-		switch (filetype) {
+	SpuCommonAttr cmn_attr;
+	u_char param[4];
+	switch (filetype) {
 		case MUSIC_NONE:
 			return 0;
-			break;
 		case MUSIC_MOD:
 			MOD_Init();
 			return 0;
-			break;
 		case MUSIC_SEQ:
 		case MUSIC_SEP:
 			SsInit();
-			SsSetTableSize (seq_table, 2, 16);
+			SsSetTableSize (seq_table, 1, 16);
 			SsSetTickMode (p.TickMode);
 			return 0;
-			break;
+		case MUSIC_VAG:
+			SpuInit();
+			SpuInitMalloc (MALLOC_MAX, spu_malloc_rec);
+			cmn_attr.mask = (SPU_COMMON_MVOLL | SPU_COMMON_MVOLR);
+			cmn_attr.mvol.left = p.MvolL << 7;
+			cmn_attr.mvol.right = p.MvolR << 7;
+			SpuSetCommonAttr(&cmn_attr);
+			SpuSetIRQ(SPU_OFF);
+			return 0;
+		case MUSIC_DA:
+			//memset((u_char*)TEMP_AREA, 0, 400);
+			septrk = CdGetToc((CdlLOC*)TEMP_AREA) - 1;
+			CdControl(CdlDemute, 0, 0);
+			CdControlB(CdlSetfilter, 0, 0);
+			CDReverbEnable();
+			param[0] = CdlModeDA;
+			CdControl(CdlSetmode, param, 0);
+			return 0;
+		case MUSIC_XA:
+			CdControl(CdlDemute, 0, 0);
+			Oldcallback = CdReadyCallback((CdlCB)cbready);
+			CDReverbEnable();
+			return 0;
 		default:
 			return 1;
 		}
@@ -2028,25 +2511,44 @@ int LoadMusic (u_long filetype) {
 }
 
 int PlayMusic (u_long filetype) {
-	
+	u_char param[4] = {0};
+	u_char result[8] = {0};
 	switch (filetype) {
 		case MUSIC_NONE:
 			return 1;
-			break;
 		case MUSIC_MOD:
 			MOD_Start();
 			return 1;
-			break;
 		case MUSIC_SEQ:
+			SsUtReverbOn();
 			SsSeqReplay(seq1);
 			//SsUtReverbOn();
 			return 1;
-			break;
 		case MUSIC_SEP:
+			SsUtReverbOn();
 			SsSepReplay(sep1, curtrk);
 			//SsUtReverbOn();
 			return 1;
-			break;
+		/*case MUSIC_VAG:
+			//SpuSetKey(SpuOn,SPU_0CH);
+			SpuSetMute(SPU_OFF);
+			return 1;*/
+		case MUSIC_DA:
+			CdControl(CdlGetlocP, param, result);
+			param[0] = result[5];
+			param[1] = result[6];
+			param[2] = result[7];
+			param[3] = result[0];
+			CdControl(CdlPlay, param, result);
+			return 1;
+		case MUSIC_XA:
+			CdControl(CdlGetlocP, param, result);
+			param[0] = result[5];
+			param[1] = result[6];
+			param[2] = result[7];
+			param[3] = result[0];
+			CdControl(CdlReadS, param, result);
+			return 1;
 		default:
 			return 1;
 		}
@@ -2059,21 +2561,25 @@ int PauseMusic (u_long filetype) {
 	switch (filetype) {
 		case MUSIC_NONE:
 			return 0;
-			break;
 		case MUSIC_MOD:
 			MOD_Stop();
 			return 0;
-			break;
 		case MUSIC_SEQ:
 			SsSeqPause(seq1);
 			//SsUtReverbOff();
 			return 0;
-			break;
 		case MUSIC_SEP:
 			SsSepPause(sep1, curtrk);
 			//SsUtReverbOff();
 			return 0;
-			break;
+		/*case MUSIC_VAG:
+			//SpuSetKey(SpuOff,SPU_0CH);
+			SpuSetMute(SPU_ON);
+			return 0;*/
+		case MUSIC_DA:
+		case MUSIC_XA:
+			CdControlB(CdlPause, 0, 0);
+			return 0;
 		default:
 			return 0;
 		}
@@ -2082,27 +2588,33 @@ int PauseMusic (u_long filetype) {
 }
 
 short ChangeTrack (short nowtrack, u_long filetype) {
+	int loc[2] = {0};
 	switch (filetype) {
 		case MUSIC_NONE:
 		case MUSIC_MOD:
 			return nowtrack;
-			break;
 		case MUSIC_SEQ:
 			SsSeqClose (seq1);
 			seq1 = SsSeqOpen ((unsigned long*)QLPfilePtr((u_long*)MOD_AREA, nowtrack), vab1);
+			SsUtReverbOn();
 			SsSetMVol (p.MvolL, p.MvolR);
 			SsSeqSetVol (seq1, p.VolL, p.VolR);
 			SsSeqPlay(seq1, SSPLAY_PLAY, (short)p.SeqLoops);
 			return nowtrack;
-			break;
 		case MUSIC_SEP:
 			SsSepStop(sep1, curtrk);
+			SsUtReverbOn();
 			SsSepPlay(sep1, nowtrack, SSPLAY_PLAY, (short)p.SeqLoops);
 			return nowtrack;
-			break;
+		case MUSIC_DA:
+			loc[0] = nowtrack + 2;
+			CdPlay(1, loc, 0);
+			return nowtrack;
+		case MUSIC_XA:
+			LoadXA(0, nowtrack, false);
+			return nowtrack;
 		default:
 			return nowtrack;
-			break;
 		}
 	return nowtrack;
 }
@@ -2112,15 +2624,19 @@ short ChangeVol (short nowvolL, short nowvolR, u_long filetype) {
 		case MUSIC_NONE:
 		case MUSIC_MOD:
 			return (nowvolL + nowvolR) / 2;
-			break;
 		case MUSIC_SEQ:
 			SsSeqSetVol (seq1, nowvolL, nowvolR);
 			return (nowvolL + nowvolR) / 2;
-			break;
 		case MUSIC_SEP:
 			SsSepSetVol (sep1, curtrk, nowvolL, nowvolR);
 			return (nowvolL + nowvolR) / 2;
-			break;
+		case MUSIC_VAG:
+			SpuSetVoiceVolume(SPU_0CH, nowvolL << 7, nowvolR << 7);
+			return (nowvolL + nowvolR) / 2;
+		case MUSIC_DA:
+		case MUSIC_XA:
+			SsSetSerialVol(SS_SERIAL_A, nowvolL, nowvolR);
+			return (nowvolL + nowvolR) / 2;
 		default:
 			return (nowvolL + nowvolR) / 2;
 			break;
@@ -2133,15 +2649,14 @@ short ChangeRVol (short nowvolL, short nowvolR, u_long filetype) {
 		case MUSIC_NONE:
 		case MUSIC_MOD:
 			return (nowvolL + nowvolR) / 2;
-			break;
 		case MUSIC_SEQ:
 		case MUSIC_SEP:
+		case MUSIC_DA:
+		case MUSIC_XA:
 			SsSetRVol (nowvolL, nowvolR);
-			return (nowvolL + nowvolR) / 2;
-			break;
+			return (nowvolL + nowvolR) / 2;	
 		default:
 			return (nowvolL + nowvolR) / 2;
-			break;
 		}
 	return (nowvolL + nowvolR) / 2;
 }
@@ -2149,7 +2664,7 @@ short ChangeRVol (short nowvolL, short nowvolR, u_long filetype) {
 int CDRF(char* file, u_long *addr, u_long startsect, u_long nsect) {
 	CdlFILE cdlf;
 	if (startsect == 0) {
-		return CdReadFile(file, addr, nsect * 2048);
+		return CdReadFile(file, addr, nsect << 11); //2048
 	} else {
 		sprintf(StringBuff, "%s;1", file);
 		if (CdSearchFile(&cdlf, StringBuff) == 0) {
@@ -2158,8 +2673,42 @@ int CDRF(char* file, u_long *addr, u_long startsect, u_long nsect) {
 		}
 		CdIntToPos(CdPosToInt(&cdlf.pos) + startsect, &cdlf.pos);
 		CdControl(CdlSetloc, (u_char*)&cdlf.pos, 0);
-		return CdRead(nsect, addr, CdlModeSpeed);
+		CdRead(nsect, addr, CdlModeSpeed);
+		return nsect << 11;
 	}
+}
+
+int CDReverbEnable() {
+	CdlATV vol;
+	
+	vol.val0 = 127;
+	vol.val1 = 0;
+	vol.val2 = 127;
+	vol.val3 = 0;
+	CdMix(&vol);
+	
+	SpuInit();
+	SpuSetTransStartAddr(421887);
+	SpuWrite0(1024 * 100);
+	
+	SsInit();
+	SsUtReverbOff();
+	SsUtSetReverbType(0);
+	SsUtSetReverbDepth(0, 0);
+	SsSetTickMode(SS_TICKVSYNC);
+	
+	SsSetMVol(p.MvolL, p.MvolR);
+	SsSetSerialAttr(SS_SERIAL_A, SS_MIX, SS_SON);
+	SsSetSerialAttr(SS_SERIAL_A, SS_REV, SS_SON);
+	SsSetSerialVol(SS_SERIAL_A, p.VolL, p.VolR);
+	
+	SsUtSetReverbType(p.Rmode);
+	SsUtSetReverbDepth(p.RdepthL, p.RdepthR);
+	SsUtSetReverbDelay(p.Rdelay);
+	SsUtSetReverbFeedback(p.Rfeedback);
+	SsUtReverbOn();
+	
+	return 0;
 }
 
 PARAMS_V1 ParamsV1ToDefault() {
@@ -2224,35 +2773,47 @@ short ChangeRevMode (short revmode, u_long filetype) {
 	switch (filetype) {
 		case MUSIC_NONE:
 			return revmode;
-			break;
 		case MUSIC_MOD:
 			return revmode;
-			break;
 		case MUSIC_SEP:
 		case MUSIC_SEQ:
+		case MUSIC_DA:
+		case MUSIC_XA:
+			SpuClearReverbWorkArea(p.Rmode);
+			SsUtReverbOn();
 			SsUtSetReverbType(revmode);
 			return revmode;
-			break;
+		case MUSIC_VAG:
+			SpuClearReverbWorkArea(p.Rmode);
+			SpuSetReverbModeType(revmode);
+			ChangeRDepth(p.RdepthL, p.RdepthR, filetype);
+			return revmode;
 		default:
-			return 0;
+			return revmode;
 		}
 	return -1;
 }
 
 short ChangeRDepth (short nowvolL, short nowvolR, u_long filetype) {
+	SpuReverbAttr rev_attr;
 	switch (filetype) {
 		case MUSIC_NONE:
 		case MUSIC_MOD:
 			return (nowvolL + nowvolR) / 2;
-			break;
 		case MUSIC_SEQ:
 		case MUSIC_SEP:
+		case MUSIC_DA:
+		case MUSIC_XA:
 			SsUtSetReverbDepth(nowvolL, nowvolR);
 			return (nowvolL + nowvolR) / 2;
-			break;
+		case MUSIC_VAG:
+			rev_attr.mask = (SPU_REV_DEPTHL | SPU_REV_DEPTHR);
+			rev_attr.depth.left = nowvolL << 7;
+			rev_attr.depth.right = nowvolR << 7;
+			SpuSetReverbDepth(&rev_attr);
+			return (nowvolL + nowvolR) / 2;
 		default:
 			return (nowvolL + nowvolR) / 2;
-			break;
 		}
 	return (nowvolL + nowvolR) / 2;
 }
@@ -2262,15 +2823,17 @@ short ChangeDelay (short nowfbdel, u_long filetype) {
 		case MUSIC_NONE:
 		case MUSIC_MOD:
 			return nowfbdel;
-			break;
 		case MUSIC_SEQ:
 		case MUSIC_SEP:
+		case MUSIC_DA:
+		case MUSIC_XA:
 			SsUtSetReverbDelay(nowfbdel);
 			return nowfbdel;
-			break;
+		case MUSIC_VAG:
+			SpuSetReverbModeDelayTime(nowfbdel);
+			return nowfbdel;
 		default:
 			return nowfbdel;
-			break;
 		}
 	return nowfbdel;
 }
@@ -2280,15 +2843,17 @@ short ChangeFeedback (short nowfbdel, u_long filetype) {
 		case MUSIC_NONE:
 		case MUSIC_MOD:
 			return nowfbdel;
-			break;
 		case MUSIC_SEQ:
 		case MUSIC_SEP:
+		case MUSIC_DA:
+		case MUSIC_XA:
 			SsUtSetReverbFeedback(nowfbdel);
 			return nowfbdel;
-			break;
+		case MUSIC_VAG:
+			SpuSetReverbModeFeedback(nowfbdel);
+			return nowfbdel;
 		default:
 			return nowfbdel;
-			break;
 		}
 	return nowfbdel;
 }
@@ -2369,7 +2934,7 @@ PARAMS_HEADER* ParamFile(u_long stack, u_long *QLP_AREA) {
 		ExtTracks += (stack + 2);
 		//printf("QLP File Selected: %i\n", ExtTracks);
 	} else {
-	return &ParamsNull;
+		return &ParamsNull;
 	}
 	return (PARAMS_HEADER*)QLPfilePtr(QLP_AREA, ExtTracks);
 }
